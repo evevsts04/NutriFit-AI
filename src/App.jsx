@@ -23,7 +23,7 @@ import {
   BrainCircuit, AlertCircle, Info, TrendingUp, TrendingDown, Minus
 } from 'lucide-react';
 
-// Firebase Config provided by environment
+// ⚠️ COLE SUAS CHAVES DO FIREBASE AQUI DENTRO DAS ASPAS
 const firebaseConfig = {
   apiKey: "AIzaSyBvxGPt966FFn9283gc2SRLYZrRbfHQ_4Y",
   authDomain: "nutrifit-ai-afdd5.firebaseapp.com",
@@ -37,7 +37,7 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const appId = 'nutrifit-app'; // Nome fixo para o banco de dados
+const appId = 'nutrifit-app'; 
 
 const getLocalDateString = () => {
   const date = new Date();

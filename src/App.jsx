@@ -20,10 +20,11 @@ import {
 import { 
   Activity, Droplets, Flame, User, LogOut, Plus, Settings, 
   X, Check, ChevronRight, Utensils, Apple, Coffee, Moon, Sun, 
-  BrainCircuit, AlertCircle, Info, TrendingUp, TrendingDown, Minus
+  BrainCircuit, AlertCircle, Info, TrendingUp, TrendingDown, Minus,
+  Scale, Target
 } from 'lucide-react';
 
-// ⚠️ COLE SUAS CHAVES DO FIREBASE AQUI DENTRO DAS ASPAS
+// Firebase Config
 const firebaseConfig = {
   apiKey: "AIzaSyBvxGPt966FFn9283gc2SRLYZrRbfHQ_4Y",
   authDomain: "nutrifit-ai-afdd5.firebaseapp.com",
@@ -33,7 +34,6 @@ const firebaseConfig = {
   appId: "1:912273156639:web:57dc596ef5655725a0832a"
 };
 
-// Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
@@ -48,7 +48,6 @@ const getLocalDateString = () => {
 };
 
 const calculateBMR = (weight, height, age, gender) => {
-  // Equação Mifflin-St Jeor
   let bmr = (10 * weight) + (6.25 * height) - (5 * age);
   return gender === 'male' ? bmr + 5 : bmr - 161;
 };
@@ -63,11 +62,10 @@ const calculateTargets = (weight, height, age, gender, activity, goal) => {
   
   targetCalories = Math.round(targetCalories);
 
-  // Divisão de Macros Básica
-  const protein = Math.round(weight * 2.2); // 2.2g por kg
-  const fats = Math.round(weight * 1.0); // 1g por kg
+  const protein = Math.round(weight * 2.2); 
+  const fats = Math.round(weight * 1.0); 
   const carbCalories = targetCalories - (protein * 4) - (fats * 9);
-  const carbs = Math.max(50, Math.round(carbCalories / 4)); // Mínimo de 50g
+  const carbs = Math.max(50, Math.round(carbCalories / 4)); 
 
   return { calories: targetCalories, protein, carbs, fats, water: 2500 + (activity > 1.3 ? 500 : 0) };
 };
@@ -77,13 +75,13 @@ export default function App() {
   const [profile, setProfile] = useState(null);
   const [todayLog, setTodayLog] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [currentScreen, setCurrentScreen] = useState('auth'); // auth, setup, dashboard
+  const [currentScreen, setCurrentScreen] = useState('auth'); 
   const [dateString, setDateString] = useState(getLocalDateString());
   
-  // UI States
   const [toast, setToast] = useState({ show: false, message: '', type: 'info' });
   const [showMealModal, setShowMealModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [showWeightModal, setShowWeightModal] = useState(false);
   const [selectedMealSection, setSelectedMealSection] = useState('Almoço');
   const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_api_key') || '');
 
@@ -92,7 +90,6 @@ export default function App() {
     setTimeout(() => setToast({ show: false, message: '', type: 'info' }), 3500);
   };
 
-  // Auth Initialization
   useEffect(() => {
     const initAuth = async () => {
       try {
@@ -117,7 +114,6 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Daily Log Subscription
   useEffect(() => {
     if (!user || currentScreen !== 'dashboard') return;
     
@@ -126,7 +122,6 @@ export default function App() {
       if (docSnap.exists()) {
         setTodayLog(docSnap.data());
       } else {
-        // Inicializa o dia vazio
         const initialLog = {
           water: 0,
           meals: [],
@@ -179,6 +174,32 @@ export default function App() {
     }
   };
 
+  const saveWeight = async (newWeight) => {
+    if (!user || !profile) return;
+    const today = getLocalDateString();
+    const numWeight = Number(newWeight);
+    let updatedHistory = [...(profile.weightHistory || [])];
+
+    const existingIndex = updatedHistory.findIndex(entry => entry.date === today);
+    if (existingIndex >= 0) {
+      updatedHistory[existingIndex] = { date: today, weight: numWeight, timestamp: Date.now() };
+    } else {
+      updatedHistory.push({ date: today, weight: numWeight, timestamp: Date.now() });
+    }
+    
+    updatedHistory.sort((a, b) => a.timestamp - b.timestamp);
+
+    try {
+      const profileRef = doc(db, 'artifacts', appId, 'users', user.uid);
+      await updateDoc(profileRef, { weight: numWeight, weightHistory: updatedHistory });
+      setProfile({ ...profile, weight: numWeight, weightHistory: updatedHistory });
+      setShowWeightModal(false);
+      showToast("Peso atualizado com sucesso!", "success");
+    } catch (e) {
+      showToast("Erro ao salvar peso", "error");
+    }
+  };
+
   const addWater = async (amount) => {
     if (!user || !todayLog) return;
     const logRef = doc(db, 'artifacts', appId, 'users', user.uid, 'logs', dateString);
@@ -228,6 +249,53 @@ export default function App() {
     );
   };
 
+  const WeightModal = () => {
+    const [inputWeight, setInputWeight] = useState(profile?.weight || '');
+    const [isSaving, setIsSaving] = useState(false);
+
+    if (!showWeightModal) return null;
+
+    const handleSave = async () => {
+      if (!inputWeight) return;
+      setIsSaving(true);
+      await saveWeight(inputWeight);
+      setIsSaving(false);
+    };
+
+    return (
+      <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div className="bg-slate-900 border border-slate-700 w-full max-w-sm rounded-3xl p-6 shadow-2xl relative">
+          <button onClick={() => setShowWeightModal(false)} className="absolute top-4 right-4 text-slate-400 hover:text-white">
+            <X className="w-6 h-6" />
+          </button>
+          <h3 className="text-xl font-bold text-white mb-2 flex items-center gap-2">
+            <Scale className="text-indigo-400 w-5 h-5" /> Registrar Peso
+          </h3>
+          <p className="text-sm text-slate-400 mb-4">Acompanhe sua evolução e progressão de ganho.</p>
+          
+          <div className="flex items-center gap-2 mb-4">
+            <input
+              type="number"
+              step="0.1"
+              value={inputWeight}
+              onChange={(e) => setInputWeight(e.target.value)}
+              className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-4 text-white text-2xl font-bold text-center focus:outline-none focus:border-indigo-500"
+            />
+            <span className="text-slate-400 font-bold text-xl">kg</span>
+          </div>
+
+          <button
+            onClick={handleSave}
+            disabled={isSaving}
+            className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-50"
+          >
+            {isSaving ? 'Salvando...' : 'Salvar Peso'}
+          </button>
+        </div>
+      </div>
+    );
+  };
+
   const MealModal = () => {
     const [input, setInput] = useState('');
     const [aiResult, setAiResult] = useState(null);
@@ -238,7 +306,7 @@ export default function App() {
       setIsAnalyzing(true);
       setAiResult(null);
 
-      const prompt = `Você é um nutricionista. Analise esta refeição: "${input}".
+      const prompt = `Você é um nutricionista focado em ganho de densidade muscular e hipertrofia. Analise esta refeição: "${input}".
       Estime os macronutrientes totais. 
       Retorne APENAS um objeto JSON válido (sem blocos markdown como \`\`\`json) contendo exatamente estas chaves:
       "name" (nome resumido da refeição), "calories" (número), "protein" (número em gramas), "carbs" (número em gramas), "fats" (número em gramas).`;
@@ -306,7 +374,7 @@ export default function App() {
             <button
               onClick={analyzeMeal}
               disabled={isAnalyzing}
-              className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-3.5 rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+              className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-3.5 rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50"
             >
               {isAnalyzing ? (
                 <><BrainCircuit className="w-5 h-5 animate-pulse" /> Analisando com IA...</>
@@ -375,7 +443,7 @@ export default function App() {
                 value={tempKey}
                 onChange={(e) => setTempKey(e.target.value)}
                 placeholder="Insira sua API Key..."
-                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
               />
               <p className="text-[10px] text-slate-500 mt-2">
                 Se deixado em branco, o sistema tentará usar a chave padrão do ambiente (Canvas).
@@ -384,7 +452,7 @@ export default function App() {
             
             <div className="flex gap-2 pt-4">
               <button onClick={() => setShowSettingsModal(false)} className="flex-1 bg-slate-800 hover:bg-slate-700 text-white py-3 rounded-xl transition">Cancelar</button>
-              <button onClick={saveSettings} className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 rounded-xl transition">Salvar</button>
+              <button onClick={saveSettings} className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 rounded-xl transition">Salvar</button>
             </div>
           </div>
         </div>
@@ -421,7 +489,6 @@ export default function App() {
 
     return (
       <div className="min-h-screen bg-slate-950 flex flex-col justify-center items-center p-6 relative overflow-hidden">
-        {/* BG Decorations */}
         <div className="absolute top-0 left-0 w-full h-96 bg-gradient-to-b from-emerald-500/20 to-transparent blur-3xl pointer-events-none"></div>
         
         <div className="w-full max-w-md z-10">
@@ -467,7 +534,7 @@ export default function App() {
 
   const OnboardingScreen = () => {
     const [formData, setFormData] = useState({
-      weight: 70, height: 170, age: 30, gender: 'male', activity: 1.2, goal: 'loss'
+      weight: 65, targetWeight: 75, height: 170, age: 30, gender: 'male', activity: 1.2, goal: 'gain'
     });
 
     const handleSubmit = (e) => {
@@ -477,7 +544,12 @@ export default function App() {
         formData.gender, Number(formData.activity), formData.goal
       );
       
-      const completeProfile = { ...formData, targets, createdAt: new Date().toISOString() };
+      const completeProfile = { 
+        ...formData, 
+        targets, 
+        weightHistory: [{ date: getLocalDateString(), weight: Number(formData.weight), timestamp: Date.now() }],
+        createdAt: new Date().toISOString() 
+      };
       handleSaveProfile(completeProfile);
     };
 
@@ -494,16 +566,23 @@ export default function App() {
                 <input type="number" step="0.1" required value={formData.weight} onChange={e=>setFormData({...formData, weight: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 outline-none" />
               </div>
               <div className="space-y-1">
-                <label className="text-xs text-slate-400 ml-1">Altura (cm)</label>
-                <input type="number" required value={formData.height} onChange={e=>setFormData({...formData, height: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 outline-none" />
+                <label className="text-xs text-slate-400 ml-1">Meta de Peso (kg)</label>
+                <input type="number" step="0.1" required value={formData.targetWeight} onChange={e=>setFormData({...formData, targetWeight: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 outline-none" />
               </div>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1">
+                <label className="text-xs text-slate-400 ml-1">Altura (cm)</label>
+                <input type="number" required value={formData.height} onChange={e=>setFormData({...formData, height: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 outline-none" />
+              </div>
+              <div className="space-y-1">
                 <label className="text-xs text-slate-400 ml-1">Idade</label>
                 <input type="number" required value={formData.age} onChange={e=>setFormData({...formData, age: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 outline-none" />
               </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1">
                 <label className="text-xs text-slate-400 ml-1">Gênero</label>
                 <select value={formData.gender} onChange={e=>setFormData({...formData, gender: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 outline-none">
@@ -511,16 +590,15 @@ export default function App() {
                   <option value="female">Feminino</option>
                 </select>
               </div>
-            </div>
-
-            <div className="space-y-1">
-              <label className="text-xs text-slate-400 ml-1">Nível de Atividade Física</label>
-              <select value={formData.activity} onChange={e=>setFormData({...formData, activity: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 outline-none">
-                <option value="1.2">Sedentário (Trabalho de escritório)</option>
-                <option value="1.375">Leve (1-2 dias/semana)</option>
-                <option value="1.55">Moderado (3-5 dias/semana)</option>
-                <option value="1.725">Intenso (6-7 dias/semana)</option>
-              </select>
+              <div className="space-y-1">
+                <label className="text-xs text-slate-400 ml-1">Nível de Atividade Física</label>
+                <select value={formData.activity} onChange={e=>setFormData({...formData, activity: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 outline-none">
+                  <option value="1.2">Sedentário (Trabalho de escritório)</option>
+                  <option value="1.375">Leve (1-2 dias/semana)</option>
+                  <option value="1.55">Moderado (3-5 dias/semana)</option>
+                  <option value="1.725">Intenso (6-7 dias/semana)</option>
+                </select>
+              </div>
             </div>
 
             <div className="space-y-2">
@@ -568,6 +646,42 @@ export default function App() {
     const calPercent = Math.min(100, (c.calories / t.calories) * 100);
     const strokeDashoffset = 283 - (283 * calPercent) / 100;
 
+    // Lógica Evolução Corporal
+    const history = profile.weightHistory || [];
+    let paceText = "Primeira pesagem registrada";
+    let paceColor = "text-slate-400";
+    
+    if (history.length >= 2) {
+      const last = history[history.length - 1].weight;
+      const prev = history[history.length - 2].weight;
+      const diff = (last - prev) * 1000;
+      if (diff > 0) {
+        paceText = `+${Math.round(diff)}g desde a última pesagem`;
+        paceColor = "text-emerald-400";
+      } else if (diff < 0) {
+        paceText = `${Math.round(diff)}g desde a última pesagem`;
+        paceColor = "text-rose-400";
+      } else {
+        paceText = "Peso mantido desde a última pesagem";
+        paceColor = "text-slate-400";
+      }
+    }
+
+    // Mini Gráfico SVG
+    const weights = history.map(h => h.weight);
+    const targetW = profile.targetWeight || 75;
+    const minW = Math.min(...weights, targetW) - 1;
+    const maxW = Math.max(...weights, targetW) + 1;
+    const range = maxW - minW || 1;
+
+    const points = history.map((h, i) => {
+      const x = history.length > 1 ? (i / (history.length - 1)) * 100 : 50;
+      const y = 100 - ((h.weight - minW) / range) * 100;
+      return `${x},${y}`;
+    }).join(' ');
+    
+    const targetY = 100 - ((targetW - minW) / range) * 100;
+
     const mealSections = [
       { name: 'Café da Manhã', icon: Coffee, color: 'text-amber-400' },
       { name: 'Lanche da Manhã', icon: Apple, color: 'text-red-400' },
@@ -579,7 +693,6 @@ export default function App() {
 
     return (
       <div className="min-h-screen bg-slate-950 text-white flex flex-col relative pb-24">
-        {/* Header */}
         <header className="sticky top-0 z-10 bg-slate-950/80 backdrop-blur-lg border-b border-slate-800 p-5 flex justify-between items-center">
           <div>
             <h1 className="text-xl font-bold flex items-center gap-2">
@@ -600,7 +713,7 @@ export default function App() {
         </header>
 
         <div className="p-4 space-y-6 max-w-md mx-auto w-full flex-1">
-          {/* Calorie Ring */}
+          
           <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 relative overflow-hidden">
             <div className="absolute -right-10 -top-10 w-32 h-32 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none"></div>
             
@@ -636,7 +749,56 @@ export default function App() {
             </div>
           </div>
 
-          {/* Macros */}
+          {/* NOVO: Weight Tracker Card */}
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 relative overflow-hidden">
+            <div className="flex justify-between items-start mb-4">
+              <div>
+                <h3 className="text-lg font-bold flex items-center gap-2">
+                  <Scale className="w-5 h-5 text-indigo-400" /> Evolução Corporal
+                </h3>
+                <p className={`text-xs mt-1 font-medium ${paceColor}`}>{paceText}</p>
+              </div>
+              <button onClick={() => setShowWeightModal(true)} className="bg-indigo-500/10 text-indigo-400 hover:bg-indigo-500/20 p-2 rounded-xl transition">
+                <Plus className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="flex justify-between items-end mb-4">
+              <div>
+                <span className="text-3xl font-extrabold text-white">{profile.weight}</span>
+                <span className="text-sm text-slate-400 ml-1">kg</span>
+                <div className="text-[10px] text-slate-500 uppercase tracking-widest mt-1">Atual</div>
+              </div>
+              <div className="text-right">
+                <div className="flex items-center justify-end gap-1 text-slate-400 mb-1">
+                  <Target className="w-3 h-3" />
+                  <span className="text-sm font-bold text-white">{profile.targetWeight}</span>
+                  <span className="text-xs">kg</span>
+                </div>
+                <div className="text-[10px] text-slate-500 uppercase tracking-widest">Meta</div>
+              </div>
+            </div>
+
+            {/* Mini Graph */}
+            {history.length > 0 && (
+              <div className="h-16 w-full mt-2 relative">
+                 <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="w-full h-full overflow-visible">
+                    <line x1="0" y1={targetY} x2="100" y2={targetY} stroke="#10b981" strokeWidth="1" strokeDasharray="4 4" opacity="0.5" />
+                    {history.length > 1 && (
+                      <polyline 
+                        points={points}
+                        fill="none" 
+                        stroke="#6366f1" 
+                        strokeWidth="3" 
+                        strokeLinecap="round" 
+                        strokeLinejoin="round" 
+                      />
+                    )}
+                 </svg>
+              </div>
+            )}
+          </div>
+
           <div className="grid grid-cols-3 gap-3">
             {[
               { id: 'pro', label: 'Proteína', current: c.protein, target: t.protein, color: 'bg-blue-500', bg: 'bg-blue-500/20' },
@@ -658,7 +820,6 @@ export default function App() {
             ))}
           </div>
 
-          {/* Water Tracker */}
           <div className="bg-slate-900 border border-slate-800 p-4 rounded-3xl flex items-center justify-between">
             <div className="flex items-center gap-4">
               <div className="w-12 h-12 rounded-2xl bg-cyan-500/10 text-cyan-400 flex items-center justify-center border border-cyan-500/20">
@@ -674,7 +835,6 @@ export default function App() {
             </button>
           </div>
 
-          {/* Meals List */}
           <div className="space-y-4">
             <h3 className="font-bold text-lg px-1 pt-2">Refeições</h3>
             {mealSections.map((section, idx) => {
@@ -709,7 +869,6 @@ export default function App() {
                     </div>
                   </div>
                   
-                  {/* Meal Items (Hidden by default if empty, open if has items) */}
                   <div className={`${mealsInSection.length === 0 ? 'hidden' : ''} border-t border-slate-800 p-2 space-y-2 bg-slate-900/50`}>
                     {mealsInSection.length === 0 ? (
                       <div className="p-3 text-center text-xs text-slate-500 italic">Nenhuma refeição registrada.</div>
@@ -734,7 +893,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Global Floating Action Button */}
         <button 
           onClick={() => { setSelectedMealSection('Outros'); setShowMealModal(true); }} 
           className="fixed bottom-6 right-6 w-14 h-14 bg-emerald-500 text-slate-950 rounded-full shadow-[0_4px_20px_rgba(16,185,129,0.5)] flex items-center justify-center hover:scale-105 transition-transform z-20"
@@ -758,6 +916,7 @@ export default function App() {
     <div className="font-sans antialiased text-slate-100 bg-slate-950 min-h-screen">
       <Toast />
       <MealModal />
+      <WeightModal />
       <SettingsModal />
 
       {currentScreen === 'auth' && <AuthScreen />}

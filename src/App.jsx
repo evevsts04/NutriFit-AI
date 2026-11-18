@@ -25,7 +25,7 @@ import {
   X, Check, ChevronLeft, ChevronRight, Utensils, Apple, Coffee, Moon, Sun,
   BrainCircuit, AlertCircle, Info, TrendingUp, TrendingDown, Minus,
   Scale, Target, Trash2, Search, Calendar, BarChart3, Bookmark,
-  Sparkles, Edit3, Award
+  Sparkles, Edit3, Award, SlidersHorizontal, Dumbbell, Flame
 } from 'lucide-react';
 
 // ==========================================
@@ -88,31 +88,207 @@ const getPastDateRange = (daysCount) => {
   return list;
 };
 
-const calculateBMR = (weight, height, age, gender) => {
-  const bmr = (10 * weight) + (6.25 * height) - (5 * age);
-  return gender === 'male' ? bmr + 5 : bmr - 161;
+// Opções de rotina diária (NEAT) e intensidade de treino
+const NEAT_OPTIONS = [
+  { value: 1.2, label: 'Sedentário / Escritório', desc: 'Maior parte do dia sentado' },
+  { value: 1.3, label: 'Levemente ativo', desc: 'Em pé ou caminhando parte do dia' },
+  { value: 1.4, label: 'Moderadamente ativo', desc: 'Movimentação constante na rotina' },
+  { value: 1.55, label: 'Trabalho físico intenso', desc: 'Esforço físico pesado diário' }
+];
+
+const TRAINING_INTENSITY_OPTIONS = [
+  { id: 'light', label: 'Leve', kcal: 200, desc: '~200 kcal/sessão' },
+  { id: 'moderate', label: 'Moderado', kcal: 350, desc: '~350 kcal/sessão' },
+  { id: 'intense', label: 'Intenso', kcal: 500, desc: '~500 kcal/sessão' }
+];
+
+const PACE_PRESETS = {
+  gain: [
+    { id: 'conservative', label: 'Limpo', delta: 250, desc: '+250 kcal' },
+    { id: 'moderate', label: 'Moderado', delta: 350, desc: '+350 kcal' },
+    { id: 'aggressive', label: 'Agressivo', delta: 500, desc: '+500 kcal' },
+    { id: 'custom', label: 'Personalizado', delta: null, desc: 'Livre' }
+  ],
+  loss: [
+    { id: 'conservative', label: 'Leve', delta: -300, desc: '-300 kcal' },
+    { id: 'moderate', label: 'Moderado', delta: -500, desc: '-500 kcal' },
+    { id: 'aggressive', label: 'Agressivo', delta: -700, desc: '-700 kcal' },
+    { id: 'custom', label: 'Personalizado', delta: null, desc: 'Livre' }
+  ]
 };
 
-const calculateTargets = (weight, height, age, gender, activity, goal) => {
-  const bmr = calculateBMR(weight, height, age, gender);
-  const tdee = bmr * activity;
+// Normaliza perfis antigos ou parciais para o novo formato do formulário
+const normalizeProfileFormData = (existingProfile = null) => {
+  const mapOldActivityToNeat = (act) => {
+    const num = Number(act);
+    if (!num) return 1.2;
+    if (num <= 1.25) return 1.2;
+    if (num <= 1.38) return 1.3;
+    if (num <= 1.56) return 1.4;
+    return 1.55;
+  };
 
-  let targetCalories = tdee;
-  if (goal === 'loss') targetCalories -= 500;
-  if (goal === 'gain') targetCalories += 300;
-  targetCalories = Math.round(targetCalories);
+  if (!existingProfile) {
+    return {
+      weight: 65,
+      targetWeight: 75,
+      height: 175,
+      age: 28,
+      gender: 'male',
+      bodyFat: '',
+      neatFactor: 1.2,
+      trainingDays: 4,
+      trainingIntensity: 'moderate',
+      extraDailyBurn: 0,
+      goal: 'gain',
+      pacePreset: 'moderate',
+      customCalorieDelta: 350,
+      manualCaloriesOverride: '',
+      proteinPerKg: 2.0,
+      fatPerKg: 0.9,
+      waterMlPerKg: 38
+    };
+  }
 
-  const protein = Math.round(weight * 2.2);
-  const fats = Math.round(weight * 1.0);
-  const carbCalories = targetCalories - (protein * 4) - (fats * 9);
+  const goal = existingProfile.goal || 'gain';
+  const defaultCustomDelta = goal === 'loss' ? 400 : 350;
+
+  return {
+    weight: existingProfile.weight ?? 65,
+    targetWeight: existingProfile.targetWeight ?? 75,
+    height: existingProfile.height ?? 175,
+    age: existingProfile.age ?? 28,
+    gender: existingProfile.gender || 'male',
+    bodyFat:
+      existingProfile.bodyFat !== undefined && existingProfile.bodyFat !== null
+        ? existingProfile.bodyFat
+        : '',
+    neatFactor:
+      existingProfile.neatFactor !== undefined
+        ? Number(existingProfile.neatFactor)
+        : mapOldActivityToNeat(existingProfile.activity),
+    trainingDays:
+      existingProfile.trainingDays !== undefined ? Number(existingProfile.trainingDays) : 4,
+    trainingIntensity: existingProfile.trainingIntensity || 'moderate',
+    extraDailyBurn:
+      existingProfile.extraDailyBurn !== undefined ? Number(existingProfile.extraDailyBurn) : 0,
+    goal,
+    pacePreset: existingProfile.pacePreset || 'moderate',
+    customCalorieDelta:
+      existingProfile.customCalorieDelta !== undefined
+        ? Number(existingProfile.customCalorieDelta)
+        : defaultCustomDelta,
+    manualCaloriesOverride:
+      existingProfile.manualCaloriesOverride !== undefined &&
+      existingProfile.manualCaloriesOverride !== null
+        ? existingProfile.manualCaloriesOverride
+        : '',
+    proteinPerKg:
+      existingProfile.proteinPerKg !== undefined ? Number(existingProfile.proteinPerKg) : 2.0,
+    fatPerKg: existingProfile.fatPerKg !== undefined ? Number(existingProfile.fatPerKg) : 0.9,
+    waterMlPerKg:
+      existingProfile.waterMlPerKg !== undefined ? Number(existingProfile.waterMlPerKg) : 38
+  };
+};
+
+// Novo Motor de Cálculo Nutricional Personalizado
+const calculateTargets = (input) => {
+  const weight = Math.max(30, Number(input.weight) || 65);
+  const height = Math.max(100, Number(input.height) || 175);
+  const age = Math.max(12, Number(input.age) || 28);
+  const gender = input.gender === 'female' ? 'female' : 'male';
+
+  const parsedBf = input.bodyFat !== '' && input.bodyFat !== null && input.bodyFat !== undefined
+    ? Number(input.bodyFat)
+    : NaN;
+  const hasValidBf = !Number.isNaN(parsedBf) && parsedBf >= 3 && parsedBf <= 60;
+
+  let bmr = 0;
+  let bmrFormula = 'Mifflin-St Jeor';
+  let leanMass = null;
+
+  if (hasValidBf) {
+    leanMass = weight * (1 - parsedBf / 100);
+    bmr = 370 + 21.6 * leanMass;
+    bmrFormula = 'Katch-McArdle';
+  } else {
+    bmr = 10 * weight + 6.25 * height - 5 * age + (gender === 'male' ? 5 : -161);
+    bmrFormula = 'Mifflin-St Jeor';
+  }
+  bmr = Math.round(bmr);
+
+  // Camada 1: Rotina Diária (NEAT)
+  const neatFactor = Number(input.neatFactor) || 1.2;
+  const neatTdee = bmr * neatFactor;
+
+  // Camada 2: Treinos Estruturados + Gasto Extra Diário
+  const trainingDays = Math.min(7, Math.max(0, Number(input.trainingDays) || 0));
+  const intensityObj =
+    TRAINING_INTENSITY_OPTIONS.find((opt) => opt.id === input.trainingIntensity) ||
+    TRAINING_INTENSITY_OPTIONS[1];
+  const dailyTrainingBurn = Math.round((trainingDays * intensityObj.kcal) / 7);
+  const extraDailyBurn = Math.max(0, Number(input.extraDailyBurn) || 0);
+
+  const tdee = Math.round(neatTdee + dailyTrainingBurn + extraDailyBurn);
+
+  // Objetivo e Ritmo (Superávit / Déficit)
+  const goal = input.goal || 'gain';
+  const pacePreset = input.pacePreset || 'moderate';
+  const customDeltaMag = Math.abs(Number(input.customCalorieDelta) || 0);
+
+  let calorieDelta = 0;
+  if (goal === 'gain') {
+    if (pacePreset === 'conservative') calorieDelta = 250;
+    else if (pacePreset === 'aggressive') calorieDelta = 500;
+    else if (pacePreset === 'custom') calorieDelta = customDeltaMag;
+    else calorieDelta = 350;
+  } else if (goal === 'loss') {
+    if (pacePreset === 'conservative') calorieDelta = -300;
+    else if (pacePreset === 'aggressive') calorieDelta = -700;
+    else if (pacePreset === 'custom') calorieDelta = -customDeltaMag;
+    else calorieDelta = -500;
+  }
+
+  const parsedOverride =
+    input.manualCaloriesOverride !== '' &&
+    input.manualCaloriesOverride !== null &&
+    input.manualCaloriesOverride !== undefined
+      ? Number(input.manualCaloriesOverride)
+      : NaN;
+  const isManualOverride = !Number.isNaN(parsedOverride) && parsedOverride >= 800;
+
+  const targetCalories = isManualOverride
+    ? Math.round(parsedOverride)
+    : Math.max(1200, Math.round(tdee + calorieDelta));
+  const effectiveDelta = targetCalories - tdee;
+
+  // Distribuição Personalizada de Macronutrientes e Água
+  const proteinPerKg = Math.min(3.5, Math.max(1.0, Number(input.proteinPerKg) || 2.0));
+  const fatPerKg = Math.min(2.0, Math.max(0.4, Number(input.fatPerKg) || 0.9));
+  const waterMlPerKg = Math.min(60, Math.max(25, Number(input.waterMlPerKg) || 38));
+
+  const protein = Math.round(weight * proteinPerKg);
+  const fats = Math.round(weight * fatPerKg);
+  const carbCalories = targetCalories - protein * 4 - fats * 9;
   const carbs = Math.max(50, Math.round(carbCalories / 4));
+
+  const rawWater = weight * waterMlPerKg + (trainingDays >= 3 ? 300 : 0);
+  const water = Math.round(rawWater / 50) * 50;
 
   return {
     calories: targetCalories,
     protein,
     carbs,
     fats,
-    water: 2500 + (activity > 1.3 ? 500 : 0)
+    water,
+    bmr,
+    tdee,
+    dailyTrainingBurn,
+    extraDailyBurn,
+    bmrFormula,
+    leanMass: leanMass ? Number(leanMass.toFixed(1)) : null,
+    calorieDelta: effectiveDelta,
+    isManualOverride
   };
 };
 
@@ -159,6 +335,512 @@ const MEAL_SECTIONS = [
 ];
 
 // ==========================================
+// FORMULÁRIO UNIFICADO DE PERFIL E METAS
+// ==========================================
+const ProfileForm = ({ initialProfile = null, mode = 'onboarding', onSubmit, onCancel }) => {
+  const [formData, setFormData] = useState(() => normalizeProfileFormData(initialProfile));
+
+  const preview = useMemo(() => calculateTargets(formData), [formData]);
+
+  const handleGoalChange = (nextGoal) => {
+    setFormData((prev) => ({
+      ...prev,
+      goal: nextGoal,
+      pacePreset: prev.pacePreset === 'custom' ? 'custom' : 'moderate',
+      customCalorieDelta: nextGoal === 'loss' ? 400 : 350
+    }));
+  };
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    const targets = calculateTargets(formData);
+    const cleanedProfile = {
+      weight: Number(formData.weight),
+      targetWeight: Number(formData.targetWeight),
+      height: Number(formData.height),
+      age: Number(formData.age),
+      gender: formData.gender,
+      bodyFat: formData.bodyFat === '' ? null : Number(formData.bodyFat),
+      neatFactor: Number(formData.neatFactor),
+      trainingDays: Number(formData.trainingDays),
+      trainingIntensity: formData.trainingIntensity,
+      extraDailyBurn: Number(formData.extraDailyBurn) || 0,
+      goal: formData.goal,
+      pacePreset: formData.pacePreset,
+      customCalorieDelta: Number(formData.customCalorieDelta) || 0,
+      manualCaloriesOverride:
+        formData.manualCaloriesOverride === '' ? null : Number(formData.manualCaloriesOverride),
+      proteinPerKg: Number(formData.proteinPerKg),
+      fatPerKg: Number(formData.fatPerKg),
+      waterMlPerKg: Number(formData.waterMlPerKg),
+      targets
+    };
+    onSubmit(cleanedProfile);
+  };
+
+  const deltaLabel =
+    preview.calorieDelta > 0
+      ? `+${preview.calorieDelta} kcal`
+      : preview.calorieDelta < 0
+      ? `${preview.calorieDelta} kcal`
+      : 'Manutenção';
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-5">
+      {/* CARD DE PRÉ-VISUALIZAÇÃO EM TEMPO REAL (LIVE PREVIEW) */}
+      <div className="sticky top-0 z-20 bg-slate-900/95 backdrop-blur-md border border-emerald-500/35 rounded-2xl p-4 shadow-xl">
+        <div className="flex items-center justify-between gap-2 mb-2.5">
+          <div className="flex items-center gap-1.5">
+            <Flame className="w-4 h-4 text-emerald-400" />
+            <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">
+              Prévia em Tempo Real
+            </span>
+          </div>
+          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">
+            {preview.bmrFormula}
+          </span>
+        </div>
+
+        <div className="flex items-end justify-between gap-2 pb-3 border-b border-slate-800">
+          <div>
+            <span className="text-[10px] text-slate-400 block">Meta Diária Final</span>
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-2xl font-extrabold text-white">{preview.calories}</span>
+              <span className="text-xs text-slate-400">kcal</span>
+              <span
+                className={`text-[10px] font-bold px-1.5 py-0.5 rounded-md ${
+                  preview.calorieDelta > 0
+                    ? 'bg-emerald-500/15 text-emerald-400'
+                    : preview.calorieDelta < 0
+                    ? 'bg-rose-500/15 text-rose-400'
+                    : 'bg-slate-800 text-slate-300'
+                }`}
+              >
+                {deltaLabel}
+              </span>
+            </div>
+          </div>
+          <div className="text-right text-[11px] text-slate-400 leading-tight">
+            <div>
+              TMB: <strong className="text-slate-200">{preview.bmr}</strong> kcal
+            </div>
+            <div>
+              GET: <strong className="text-slate-200">{preview.tdee}</strong> kcal
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-4 gap-2 pt-2.5 text-center">
+          <div>
+            <span className="block text-sm font-bold text-blue-400">{preview.protein}g</span>
+            <span className="text-[9px] text-slate-400 uppercase">Prot</span>
+          </div>
+          <div>
+            <span className="block text-sm font-bold text-amber-400">{preview.carbs}g</span>
+            <span className="text-[9px] text-slate-400 uppercase">Carb</span>
+          </div>
+          <div>
+            <span className="block text-sm font-bold text-rose-400">{preview.fats}g</span>
+            <span className="text-[9px] text-slate-400 uppercase">Gord</span>
+          </div>
+          <div>
+            <span className="block text-sm font-bold text-cyan-400">{preview.water}ml</span>
+            <span className="text-[9px] text-slate-400 uppercase">Água</span>
+          </div>
+        </div>
+      </div>
+
+      {/* SEÇÃO 1: DADOS CORPORAIS */}
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3.5">
+        <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+          <User className="w-4 h-4 text-emerald-400" /> 1. Dados Corporais
+        </h3>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-[11px] text-slate-400 ml-1 block mb-1">Peso Atual (kg)</label>
+            <input
+              type="number"
+              step="0.1"
+              min="30"
+              max="300"
+              required
+              value={formData.weight}
+              onChange={(e) => setFormData({ ...formData, weight: e.target.value })}
+              className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:border-emerald-500 outline-none"
+            />
+          </div>
+          <div>
+            <label className="text-[11px] text-emerald-400 ml-1 block mb-1 font-medium">
+              Meta de Peso (kg)
+            </label>
+            <input
+              type="number"
+              step="0.1"
+              min="30"
+              max="300"
+              required
+              value={formData.targetWeight}
+              onChange={(e) => setFormData({ ...formData, targetWeight: e.target.value })}
+              className="w-full bg-slate-950 border border-emerald-500/40 rounded-xl px-3.5 py-2.5 text-sm text-white focus:border-emerald-400 outline-none"
+            />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-3 gap-2.5">
+          <div>
+            <label className="text-[11px] text-slate-400 ml-1 block mb-1">Altura (cm)</label>
+            <input
+              type="number"
+              min="100"
+              max="250"
+              required
+              value={formData.height}
+              onChange={(e) => setFormData({ ...formData, height: e.target.value })}
+              className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white focus:border-emerald-500 outline-none"
+            />
+          </div>
+          <div>
+            <label className="text-[11px] text-slate-400 ml-1 block mb-1">Idade</label>
+            <input
+              type="number"
+              min="12"
+              max="110"
+              required
+              value={formData.age}
+              onChange={(e) => setFormData({ ...formData, age: e.target.value })}
+              className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white focus:border-emerald-500 outline-none"
+            />
+          </div>
+          <div>
+            <label className="text-[11px] text-slate-400 ml-1 block mb-1">Gênero</label>
+            <select
+              value={formData.gender}
+              onChange={(e) => setFormData({ ...formData, gender: e.target.value })}
+              className="w-full bg-slate-950 border border-slate-700 rounded-xl px-2.5 py-2.5 text-sm text-white focus:border-emerald-500 outline-none"
+            >
+              <option value="male">Masc.</option>
+              <option value="female">Fem.</option>
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between mb-1 ml-1">
+            <label className="text-[11px] text-slate-400">
+              % de Gordura Corporal - BF% (Opcional)
+            </label>
+            {preview.leanMass && (
+              <span className="text-[10px] text-emerald-400 font-medium">
+                Massa Magra: {preview.leanMass} kg
+              </span>
+            )}
+          </div>
+          <input
+            type="number"
+            step="0.5"
+            min="3"
+            max="60"
+            value={formData.bodyFat}
+            onChange={(e) => setFormData({ ...formData, bodyFat: e.target.value })}
+            placeholder="Deixe vazio para Mifflin-St Jeor (ex: 14)"
+            className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white placeholder-slate-500 focus:border-emerald-500 outline-none"
+          />
+        </div>
+      </div>
+
+      {/* SEÇÃO 2: ROTINA E TREINO */}
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-4">
+        <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+          <Dumbbell className="w-4 h-4 text-emerald-400" /> 2. Rotina e Treino
+        </h3>
+
+        <div>
+          <label className="text-[11px] text-slate-400 ml-1 block mb-1.5">
+            Atividade Diária / Trabalho (NEAT)
+          </label>
+          <select
+            value={formData.neatFactor}
+            onChange={(e) => setFormData({ ...formData, neatFactor: Number(e.target.value) })}
+            className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:border-emerald-500 outline-none"
+          >
+            {NEAT_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label} ({opt.value}x) — {opt.desc}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <div className="flex justify-between items-center mb-1.5 px-1">
+            <label className="text-[11px] text-slate-400">Dias de Treino por Semana</label>
+            <span className="text-xs font-bold text-emerald-400">
+              {formData.trainingDays} {Number(formData.trainingDays) === 1 ? 'dia' : 'dias'}/sem
+              {preview.dailyTrainingBurn > 0 && ` (+${preview.dailyTrainingBurn} kcal/dia)`}
+            </span>
+          </div>
+          <div className="grid grid-cols-8 gap-1">
+            {[0, 1, 2, 3, 4, 5, 6, 7].map((day) => (
+              <button
+                key={day}
+                type="button"
+                onClick={() => setFormData({ ...formData, trainingDays: day })}
+                className={`py-2 rounded-xl text-xs font-bold border transition ${
+                  Number(formData.trainingDays) === day
+                    ? 'bg-emerald-500 text-slate-950 border-emerald-400'
+                    : 'bg-slate-950 text-slate-400 border-slate-800 hover:border-slate-600'
+                }`}
+              >
+                {day}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {Number(formData.trainingDays) > 0 && (
+          <div>
+            <label className="text-[11px] text-slate-400 ml-1 block mb-1.5">
+              Intensidade Média dos Treinos
+            </label>
+            <div className="grid grid-cols-3 gap-2">
+              {TRAINING_INTENSITY_OPTIONS.map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => setFormData({ ...formData, trainingIntensity: opt.id })}
+                  className={`p-2.5 rounded-xl border text-center transition ${
+                    formData.trainingIntensity === opt.id
+                      ? 'bg-emerald-500/15 border-emerald-500 text-white'
+                      : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                  }`}
+                >
+                  <span className="block text-xs font-bold">{opt.label}</span>
+                  <span className="block text-[10px] text-slate-400 mt-0.5">{opt.desc}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div>
+          <label className="text-[11px] text-slate-400 ml-1 block mb-1">
+            Gasto Extra Diário Opcional (kcal) — ex: caminhadas, cardio
+          </label>
+          <input
+            type="number"
+            min="0"
+            max="2000"
+            step="10"
+            value={formData.extraDailyBurn}
+            onChange={(e) => setFormData({ ...formData, extraDailyBurn: e.target.value })}
+            placeholder="0"
+            className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:border-emerald-500 outline-none"
+          />
+        </div>
+      </div>
+
+      {/* SEÇÃO 3: OBJETIVO E RITMO */}
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-4">
+        <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+          <Target className="w-4 h-4 text-emerald-400" /> 3. Objetivo e Ritmo
+        </h3>
+
+        <div className="grid grid-cols-3 gap-2.5">
+          {[
+            { id: 'loss', label: 'Perder', Icon: TrendingDown },
+            { id: 'maintain', label: 'Manter', Icon: Minus },
+            { id: 'gain', label: 'Ganhar', Icon: TrendingUp }
+          ].map(({ id, label, Icon }) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => handleGoalChange(id)}
+              className={`p-3 rounded-xl border text-center transition-all ${
+                formData.goal === id
+                  ? 'border-emerald-500 bg-emerald-500/10 text-white'
+                  : 'border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700'
+              }`}
+            >
+              <Icon
+                className={`w-5 h-5 mx-auto mb-1 ${
+                  formData.goal === id ? 'text-emerald-400' : 'text-slate-500'
+                }`}
+              />
+              <span className="text-xs font-semibold">{label}</span>
+            </button>
+          ))}
+        </div>
+
+        {formData.goal !== 'maintain' && (
+          <div className="space-y-3">
+            <label className="text-[11px] text-slate-400 ml-1 block">
+              Ritmo de {formData.goal === 'gain' ? 'Superávit' : 'Déficit'} Calórico
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              {PACE_PRESETS[formData.goal].map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  onClick={() => setFormData({ ...formData, pacePreset: preset.id })}
+                  className={`p-2.5 rounded-xl border text-left transition ${
+                    formData.pacePreset === preset.id
+                      ? 'bg-emerald-500/15 border-emerald-500 text-white'
+                      : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                  }`}
+                >
+                  <span className="block text-xs font-bold">{preset.label}</span>
+                  <span className="block text-[10px] text-slate-400">{preset.desc}</span>
+                </button>
+              ))}
+            </div>
+
+            {formData.pacePreset === 'custom' && (
+              <div>
+                <label className="text-[11px] text-emerald-400 ml-1 block mb-1">
+                  {formData.goal === 'gain' ? 'Superávit' : 'Déficit'} Personalizado (kcal/dia)
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  max="1500"
+                  step="25"
+                  value={formData.customCalorieDelta}
+                  onChange={(e) =>
+                    setFormData({ ...formData, customCalorieDelta: e.target.value })
+                  }
+                  className="w-full bg-slate-950 border border-emerald-500/40 rounded-xl px-3.5 py-2.5 text-sm text-white focus:border-emerald-400 outline-none"
+                />
+              </div>
+            )}
+          </div>
+        )}
+
+        <div>
+          <label className="text-[11px] text-slate-400 ml-1 block mb-1">
+            Ajuste Manual de Calorias (Opcional — sobrescreve o cálculo automático)
+          </label>
+          <input
+            type="number"
+            min="800"
+            max="8000"
+            step="10"
+            value={formData.manualCaloriesOverride}
+            onChange={(e) =>
+              setFormData({ ...formData, manualCaloriesOverride: e.target.value })
+            }
+            placeholder="Deixe vazio para usar o cálculo automático"
+            className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white placeholder-slate-500 focus:border-emerald-500 outline-none"
+          />
+        </div>
+      </div>
+
+      {/* SEÇÃO 4: AJUSTE FINO DE MACROS E HIDRATAÇÃO */}
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-4">
+        <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+          <SlidersHorizontal className="w-4 h-4 text-emerald-400" /> 4. Macros e Hidratação
+        </h3>
+
+        {/* Proteína g/kg */}
+        <div>
+          <div className="flex justify-between text-xs mb-1">
+            <span className="text-blue-400 font-semibold">Proteína ({formData.proteinPerKg} g/kg)</span>
+            <span className="text-slate-300 font-bold">{preview.protein} g/dia</span>
+          </div>
+          <input
+            type="range"
+            min="1.4"
+            max="2.8"
+            step="0.1"
+            value={formData.proteinPerKg}
+            onChange={(e) => setFormData({ ...formData, proteinPerKg: Number(e.target.value) })}
+            className="w-full accent-blue-500 cursor-pointer"
+          />
+          <div className="flex justify-between text-[10px] text-slate-500">
+            <span>1.4 g/kg</span>
+            <span>2.0 g/kg</span>
+            <span>2.8 g/kg</span>
+          </div>
+        </div>
+
+        {/* Gordura g/kg */}
+        <div>
+          <div className="flex justify-between text-xs mb-1">
+            <span className="text-rose-400 font-semibold">Gorduras ({formData.fatPerKg} g/kg)</span>
+            <span className="text-slate-300 font-bold">{preview.fats} g/dia</span>
+          </div>
+          <input
+            type="range"
+            min="0.6"
+            max="1.3"
+            step="0.05"
+            value={formData.fatPerKg}
+            onChange={(e) => setFormData({ ...formData, fatPerKg: Number(e.target.value) })}
+            className="w-full accent-rose-500 cursor-pointer"
+          />
+          <div className="flex justify-between text-[10px] text-slate-500">
+            <span>0.6 g/kg</span>
+            <span>0.9 g/kg</span>
+            <span>1.3 g/kg</span>
+          </div>
+        </div>
+
+        {/* Água ml/kg */}
+        <div>
+          <div className="flex justify-between text-xs mb-1">
+            <span className="text-cyan-400 font-semibold">Água ({formData.waterMlPerKg} ml/kg)</span>
+            <span className="text-slate-300 font-bold">
+              {preview.water} ml/dia
+              {Number(formData.trainingDays) >= 3 && (
+                <span className="text-[10px] text-cyan-400 font-normal"> (+300ml treino)</span>
+              )}
+            </span>
+          </div>
+          <input
+            type="range"
+            min="30"
+            max="50"
+            step="1"
+            value={formData.waterMlPerKg}
+            onChange={(e) => setFormData({ ...formData, waterMlPerKg: Number(e.target.value) })}
+            className="w-full accent-cyan-500 cursor-pointer"
+          />
+          <div className="flex justify-between text-[10px] text-slate-500">
+            <span>30 ml/kg</span>
+            <span>40 ml/kg</span>
+            <span>50 ml/kg</span>
+          </div>
+        </div>
+
+        <p className="text-[11px] text-slate-400 bg-slate-950/70 border border-slate-800 rounded-xl p-2.5">
+          Os <strong className="text-amber-400">Carboidratos ({preview.carbs}g)</strong> são
+          calculados automaticamente com as calorias restantes da sua meta.
+        </p>
+      </div>
+
+      {/* BOTÕES DE AÇÃO */}
+      <div className="flex gap-2.5 pt-1">
+        {mode === 'edit' && onCancel && (
+          <button
+            type="button"
+            onClick={onCancel}
+            className="flex-1 bg-slate-800 hover:bg-slate-700 text-white font-semibold py-3.5 rounded-xl transition text-sm"
+          >
+            Cancelar
+          </button>
+        )}
+        <button
+          type="submit"
+          className="flex-[2] bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-3.5 rounded-xl transition-all shadow-[0_4px_20px_rgba(16,185,129,0.3)] text-sm"
+        >
+          {mode === 'edit' ? 'Salvar Alterações e Metas' : 'Gerar Plano Nutricional'}
+        </button>
+      </div>
+    </form>
+  );
+};
+
+// ==========================================
 // COMPONENTE PRINCIPAL
 // ==========================================
 export default function App() {
@@ -178,6 +860,7 @@ export default function App() {
   const [toast, setToast] = useState({ show: false, message: '', type: 'info' });
   const [showMealModal, setShowMealModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [showProfileModal, setShowProfileModal] = useState(false);
   const [selectedMealSection, setSelectedMealSection] = useState('Almoço');
   const [apiKey, setApiKey] = useState(() => {
     try {
@@ -341,14 +1024,19 @@ export default function App() {
     setLoading(true);
     try {
       const today = getLocalDateString();
-      await setDoc(doc(db, 'artifacts', appId, 'users', user.uid), profileData);
+      const payload = {
+        ...profileData,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      await setDoc(doc(db, 'artifacts', appId, 'users', user.uid), payload);
       // Também cria o primeiro registro na coleção weight_logs
       await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'weight_logs', today), {
         date: today,
         weight: Number(profileData.weight),
         timestamp: Date.now()
       });
-      setProfile(profileData);
+      setProfile(payload);
       setCurrentScreen('dashboard');
       showToast('Perfil configurado com sucesso!', 'success');
     } catch (err) {
@@ -356,6 +1044,37 @@ export default function App() {
       showToast('Erro ao salvar perfil.', 'error');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleUpdateProfile = async (updatedData) => {
+    if (!user) return;
+    try {
+      const mergedProfile = {
+        ...profile,
+        ...updatedData,
+        createdAt: profile?.createdAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      const profileRef = doc(db, 'artifacts', appId, 'users', user.uid);
+      await setDoc(profileRef, mergedProfile, { merge: true });
+
+      // Se o peso atual foi alterado na edição, sincroniza na pesagem de hoje
+      if (Number(updatedData.weight) !== Number(profile?.weight)) {
+        const today = getLocalDateString();
+        await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'weight_logs', today), {
+          date: today,
+          weight: Number(updatedData.weight),
+          timestamp: Date.now()
+        });
+      }
+
+      setProfile(mergedProfile);
+      setShowProfileModal(false);
+      showToast('Perfil e metas nutricionais atualizados!', 'success');
+    } catch (err) {
+      console.error(err);
+      showToast('Erro ao atualizar perfil.', 'error');
     }
   };
 
@@ -620,6 +1339,21 @@ export default function App() {
           </h3>
 
           <div className="space-y-4">
+            <button
+              type="button"
+              onClick={() => {
+                setShowSettingsModal(false);
+                setShowProfileModal(true);
+              }}
+              className="w-full bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 font-semibold py-3 px-4 rounded-xl transition flex items-center justify-between text-sm"
+            >
+              <span className="flex items-center gap-2">
+                <SlidersHorizontal className="w-4 h-4 text-emerald-400" />
+                Editar Perfil e Metas
+              </span>
+              <ChevronRight className="w-4 h-4" />
+            </button>
+
             <div>
               <label className="block text-xs font-medium text-slate-400 mb-1.5 ml-1">
                 Chave da API Gemini (Opcional)
@@ -650,6 +1384,43 @@ export default function App() {
                 Salvar
               </button>
             </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const ProfileEditModal = () => {
+    if (!showProfileModal || !profile) return null;
+
+    return (
+      <div className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+        <div className="bg-slate-950 border border-slate-800 w-full max-w-md rounded-t-3xl sm:rounded-3xl shadow-2xl relative max-h-[92vh] flex flex-col">
+          <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800 shrink-0">
+            <div>
+              <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                <SlidersHorizontal className="w-5 h-5 text-emerald-400" />
+                Editar Perfil e Metas
+              </h3>
+              <p className="text-xs text-slate-400">
+                Ajuste seus dados para recalcular calorias e macros
+              </p>
+            </div>
+            <button
+              onClick={() => setShowProfileModal(false)}
+              className="text-slate-400 hover:text-white p-2 rounded-full bg-slate-900 border border-slate-800"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          <div className="overflow-y-auto p-4 flex-1">
+            <ProfileForm
+              initialProfile={profile}
+              mode="edit"
+              onSubmit={handleUpdateProfile}
+              onCancel={() => setShowProfileModal(false)}
+            />
           </div>
         </div>
       </div>
@@ -1219,162 +1990,17 @@ Retorne APENAS um objeto JSON válido (sem blocos markdown) contendo exatamente 
   // TELA DE ONBOARDING
   // ==========================================
   const OnboardingScreen = () => {
-    const [formData, setFormData] = useState({
-      weight: 65,
-      targetWeight: 75,
-      height: 175,
-      age: 28,
-      gender: 'male',
-      activity: 1.55,
-      goal: 'gain'
-    });
-
-    const handleSubmit = (e) => {
-      e.preventDefault();
-      const targets = calculateTargets(
-        Number(formData.weight),
-        Number(formData.height),
-        Number(formData.age),
-        formData.gender,
-        Number(formData.activity),
-        formData.goal
-      );
-
-      const completeProfile = {
-        weight: Number(formData.weight),
-        targetWeight: Number(formData.targetWeight),
-        height: Number(formData.height),
-        age: Number(formData.age),
-        gender: formData.gender,
-        activity: Number(formData.activity),
-        goal: formData.goal,
-        targets,
-        createdAt: new Date().toISOString()
-      };
-      handleSaveProfile(completeProfile);
-    };
-
     return (
-      <div className="min-h-screen bg-slate-950 text-white p-6 pb-24 overflow-y-auto">
+      <div className="min-h-screen bg-slate-950 text-white p-4 pb-16 overflow-y-auto">
         <div className="max-w-md mx-auto">
-          <h2 className="text-2xl font-bold mb-2 pt-6">Configure seu Perfil</h2>
-          <p className="text-slate-400 text-sm mb-8">
-            Vamos calcular suas necessidades metabólicas e configurar sua meta de peso.
-          </p>
+          <div className="pt-4 pb-5">
+            <h2 className="text-2xl font-bold mb-1">Configure seu Perfil</h2>
+            <p className="text-slate-400 text-sm">
+              Personalize seus dados corporais, rotina de treinos e distribuição de macros.
+            </p>
+          </div>
 
-          <form onSubmit={handleSubmit} className="space-y-5">
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1">
-                <label className="text-xs text-slate-400 ml-1">Peso Atual (kg)</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  required
-                  value={formData.weight}
-                  onChange={(e) => setFormData({ ...formData, weight: e.target.value })}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 outline-none"
-                />
-              </div>
-              <div className="space-y-1">
-                <label className="text-xs text-emerald-400 ml-1 font-medium">Meta de Peso (kg)</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  required
-                  value={formData.targetWeight}
-                  onChange={(e) => setFormData({ ...formData, targetWeight: e.target.value })}
-                  className="w-full bg-slate-900 border border-emerald-500/50 rounded-xl px-4 py-3 focus:border-emerald-400 outline-none"
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1">
-                <label className="text-xs text-slate-400 ml-1">Altura (cm)</label>
-                <input
-                  type="number"
-                  required
-                  value={formData.height}
-                  onChange={(e) => setFormData({ ...formData, height: e.target.value })}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 outline-none"
-                />
-              </div>
-              <div className="space-y-1">
-                <label className="text-xs text-slate-400 ml-1">Idade</label>
-                <input
-                  type="number"
-                  required
-                  value={formData.age}
-                  onChange={(e) => setFormData({ ...formData, age: e.target.value })}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 outline-none"
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1">
-                <label className="text-xs text-slate-400 ml-1">Gênero</label>
-                <select
-                  value={formData.gender}
-                  onChange={(e) => setFormData({ ...formData, gender: e.target.value })}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 outline-none"
-                >
-                  <option value="male">Masculino</option>
-                  <option value="female">Feminino</option>
-                </select>
-              </div>
-              <div className="space-y-1">
-                <label className="text-xs text-slate-400 ml-1">Atividade Física</label>
-                <select
-                  value={formData.activity}
-                  onChange={(e) => setFormData({ ...formData, activity: e.target.value })}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 outline-none"
-                >
-                  <option value="1.2">Sedentário</option>
-                  <option value="1.375">Leve (1-2x/sem)</option>
-                  <option value="1.55">Moderado (3-5x/sem)</option>
-                  <option value="1.725">Intenso (6-7x/sem)</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-xs text-slate-400 ml-1">Objetivo Principal</label>
-              <div className="grid grid-cols-3 gap-3">
-                {[
-                  { id: 'loss', label: 'Perder', Icon: TrendingDown },
-                  { id: 'maintain', label: 'Manter', Icon: Minus },
-                  { id: 'gain', label: 'Ganhar', Icon: TrendingUp }
-                ].map(({ id, label, Icon }) => (
-                  <label key={id} className="cursor-pointer">
-                    <input
-                      type="radio"
-                      name="goal"
-                      value={id}
-                      checked={formData.goal === id}
-                      onChange={(e) => setFormData({ ...formData, goal: e.target.value })}
-                      className="peer sr-only"
-                    />
-                    <div className="p-4 rounded-xl border border-slate-700 bg-slate-900 peer-checked:border-emerald-500 peer-checked:bg-emerald-500/10 text-center transition-all">
-                      <Icon
-                        className={`w-6 h-6 mx-auto mb-2 ${
-                          formData.goal === id ? 'text-emerald-400' : 'text-slate-500'
-                        }`}
-                      />
-                      <span className="text-xs font-medium">{label}</span>
-                    </div>
-                  </label>
-                ))}
-              </div>
-            </div>
-
-            <button
-              type="submit"
-              className="w-full mt-6 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-4 rounded-xl transition-all shadow-[0_4px_20px_rgba(16,185,129,0.3)]"
-            >
-              Gerar Plano Nutricional
-            </button>
-          </form>
+          <ProfileForm mode="onboarding" onSubmit={handleSaveProfile} />
         </div>
       </div>
     );
@@ -2327,6 +2953,13 @@ Retorne APENAS um objeto JSON válido (sem blocos markdown) contendo exatamente 
 
           <div className="flex gap-2">
             <button
+              onClick={() => setShowProfileModal(true)}
+              className="w-10 h-10 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center text-emerald-400 hover:bg-emerald-500/10 hover:border-emerald-500/40 transition"
+              title="Editar Perfil e Metas"
+            >
+              <SlidersHorizontal className="w-4 h-4" />
+            </button>
+            <button
               onClick={() => setShowSettingsModal(true)}
               className="w-10 h-10 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-400 hover:text-white transition"
               title="Configurações"
@@ -2406,6 +3039,7 @@ Retorne APENAS um objeto JSON válido (sem blocos markdown) contendo exatamente 
       <Toast />
       <MealModal />
       <SettingsModal />
+      <ProfileEditModal />
 
       {currentScreen === 'auth' && <AuthScreen />}
       {currentScreen === 'setup' && <OnboardingScreen />}

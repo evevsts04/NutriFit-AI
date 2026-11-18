@@ -1,30 +1,36 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { initializeApp } from 'firebase/app';
-import { 
-  getAuth, 
-  signInAnonymously, 
-  signInWithCustomToken, 
-  signInWithEmailAndPassword, 
-  createUserWithEmailAndPassword, 
-  onAuthStateChanged, 
-  signOut 
+import {
+  getAuth,
+  signInAnonymously,
+  signInWithCustomToken,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  onAuthStateChanged,
+  signOut
 } from 'firebase/auth';
-import { 
-  getFirestore, 
-  doc, 
-  setDoc, 
-  getDoc, 
-  onSnapshot, 
-  updateDoc 
+import {
+  getFirestore,
+  doc,
+  setDoc,
+  getDoc,
+  onSnapshot,
+  updateDoc,
+  deleteDoc,
+  collection,
+  addDoc
 } from 'firebase/firestore';
-import { 
-  Activity, Droplets, Flame, User, LogOut, Plus, Settings, 
-  X, Check, ChevronRight, Utensils, Apple, Coffee, Moon, Sun, 
+import {
+  Activity, Droplets, User, LogOut, Plus, Settings,
+  X, Check, ChevronLeft, ChevronRight, Utensils, Apple, Coffee, Moon, Sun,
   BrainCircuit, AlertCircle, Info, TrendingUp, TrendingDown, Minus,
-  Scale, Target
+  Scale, Target, Trash2, Search, Calendar, BarChart3, Bookmark,
+  Sparkles, Edit3, Award
 } from 'lucide-react';
 
-// Firebase Config
+// ==========================================
+// CONFIGURAÇÃO DO FIREBASE
+// ==========================================
 const firebaseConfig = {
   apiKey: "AIzaSyBvxGPt966FFn9283gc2SRLYZrRbfHQ_4Y",
   authDomain: "nutrifit-ai-afdd5.firebaseapp.com",
@@ -37,59 +43,158 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const appId = 'nutrifit-app'; 
+const appId = 'nutrifit-app';
 
-const getLocalDateString = () => {
-  const date = new Date();
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
+// ==========================================
+// FUNÇÕES UTILITÁRIAS DE DATA E METABOLISMO
+// ==========================================
+const getLocalDateString = (dateObj = new Date()) => {
+  const year = dateObj.getFullYear();
+  const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+  const day = String(dateObj.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
 };
 
+const shiftDateString = (dateStr, deltaDays) => {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  dt.setDate(dt.getDate() + deltaDays);
+  return getLocalDateString(dt);
+};
+
+const formatShortDate = (dateStr) => {
+  if (!dateStr) return '';
+  const [, m, d] = dateStr.split('-');
+  return `${d}/${m}`;
+};
+
+const formatFullDatePT = (dateStr) => {
+  if (!dateStr) return '';
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d, 12, 0, 0);
+  return dt.toLocaleDateString('pt-BR', {
+    weekday: 'long',
+    day: '2-digit',
+    month: 'long'
+  });
+};
+
+const getPastDateRange = (daysCount) => {
+  const todayStr = getLocalDateString();
+  const list = [];
+  for (let i = daysCount - 1; i >= 0; i--) {
+    list.push(shiftDateString(todayStr, -i));
+  }
+  return list;
+};
+
 const calculateBMR = (weight, height, age, gender) => {
-  let bmr = (10 * weight) + (6.25 * height) - (5 * age);
+  const bmr = (10 * weight) + (6.25 * height) - (5 * age);
   return gender === 'male' ? bmr + 5 : bmr - 161;
 };
 
 const calculateTargets = (weight, height, age, gender, activity, goal) => {
   const bmr = calculateBMR(weight, height, age, gender);
   const tdee = bmr * activity;
-  
+
   let targetCalories = tdee;
   if (goal === 'loss') targetCalories -= 500;
   if (goal === 'gain') targetCalories += 300;
-  
   targetCalories = Math.round(targetCalories);
 
-  const protein = Math.round(weight * 2.2); 
-  const fats = Math.round(weight * 1.0); 
+  const protein = Math.round(weight * 2.2);
+  const fats = Math.round(weight * 1.0);
   const carbCalories = targetCalories - (protein * 4) - (fats * 9);
-  const carbs = Math.max(50, Math.round(carbCalories / 4)); 
+  const carbs = Math.max(50, Math.round(carbCalories / 4));
 
-  return { calories: targetCalories, protein, carbs, fats, water: 2500 + (activity > 1.3 ? 500 : 0) };
+  return {
+    calories: targetCalories,
+    protein,
+    carbs,
+    fats,
+    water: 2500 + (activity > 1.3 ? 500 : 0)
+  };
 };
 
+// Chamada à API Gemini com Exponential Backoff
+const fetchGeminiWithBackoff = async (url, payload, maxRetries = 3) => {
+  let delay = 1000;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (response.ok) {
+        return await response.json();
+      }
+      if (response.status === 429 || response.status >= 500) {
+        if (attempt < maxRetries) {
+          await new Promise((res) => setTimeout(res, delay));
+          delay *= 2;
+          continue;
+        }
+      }
+      const errText = await response.text();
+      throw new Error(`Erro HTTP ${response.status}: ${errText}`);
+    } catch (err) {
+      if (attempt < maxRetries) {
+        await new Promise((res) => setTimeout(res, delay));
+        delay *= 2;
+      } else {
+        throw err;
+      }
+    }
+  }
+};
+
+const MEAL_SECTIONS = [
+  { name: 'Café da Manhã', icon: Coffee, color: 'text-amber-400' },
+  { name: 'Lanche da Manhã', icon: Apple, color: 'text-red-400' },
+  { name: 'Almoço', icon: Utensils, color: 'text-orange-500' },
+  { name: 'Lanche da Tarde', icon: Sun, color: 'text-yellow-500' },
+  { name: 'Jantar', icon: Moon, color: 'text-indigo-400' },
+  { name: 'Outros', icon: Plus, color: 'text-slate-400' }
+];
+
+// ==========================================
+// COMPONENTE PRINCIPAL
+// ==========================================
 export default function App() {
   const [user, setUser] = useState(null);
   const [profile, setProfile] = useState(null);
-  const [todayLog, setTodayLog] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [currentScreen, setCurrentScreen] = useState('auth'); 
+  const [currentScreen, setCurrentScreen] = useState('auth'); // auth | setup | dashboard
+  const [activeTab, setActiveTab] = useState('today'); // today | history | evolution
   const [dateString, setDateString] = useState(getLocalDateString());
-  
+
+  // Estados dos 3 Bancos de Dados Adicionais (assinados em tempo real)
+  const [savedMeals, setSavedMeals] = useState([]);
+  const [allLogsMap, setAllLogsMap] = useState({}); // { 'YYYY-MM-DD': logData }
+  const [weightLogs, setWeightLogs] = useState([]); // ordenado crescente por data
+
+  // Estados de UI e Modais
   const [toast, setToast] = useState({ show: false, message: '', type: 'info' });
   const [showMealModal, setShowMealModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
-  const [showWeightModal, setShowWeightModal] = useState(false);
   const [selectedMealSection, setSelectedMealSection] = useState('Almoço');
-  const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_api_key') || '');
+  const [apiKey, setApiKey] = useState(() => {
+    try {
+      return window.localStorage?.getItem('gemini_api_key') || '';
+    } catch {
+      return '';
+    }
+  });
 
   const showToast = (message, type = 'info') => {
     setToast({ show: true, message, type });
-    setTimeout(() => setToast({ show: false, message: '', type: 'info' }), 3500);
+    setTimeout(() => {
+      setToast((prev) => (prev.message === message ? { show: false, message: '', type: 'info' } : prev));
+    }, 3500);
   };
 
+  // 1. Inicialização da Autenticação
   useEffect(() => {
     const initAuth = async () => {
       try {
@@ -97,7 +202,7 @@ export default function App() {
           await signInWithCustomToken(auth, __initial_auth_token);
         }
       } catch (err) {
-        console.error("Auth init error:", err);
+        console.error('Auth init error:', err);
       }
     };
     initAuth();
@@ -107,6 +212,10 @@ export default function App() {
       if (currentUser) {
         await loadProfile(currentUser.uid);
       } else {
+        setProfile(null);
+        setSavedMeals([]);
+        setAllLogsMap({});
+        setWeightLogs([]);
         setCurrentScreen('auth');
         setLoading(false);
       }
@@ -114,31 +223,84 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
+  // 2. Assinatura em Tempo Real: Perfil, Refeições Frequentes, Logs Diários e Pesagens
   useEffect(() => {
     if (!user || currentScreen !== 'dashboard') return;
-    
-    const logRef = doc(db, 'artifacts', appId, 'users', user.uid, 'logs', dateString);
-    const unsubscribe = onSnapshot(logRef, (docSnap) => {
-      if (docSnap.exists()) {
-        setTodayLog(docSnap.data());
-      } else {
-        const initialLog = {
-          water: 0,
-          meals: [],
-          totals: { calories: 0, protein: 0, carbs: 0, fats: 0 }
-        };
-        setDoc(logRef, initialLog).catch(err => console.error("Erro ao criar log diário", err));
-        setTodayLog(initialLog);
-      }
-      setLoading(false);
-    }, (error) => {
-      console.error("Erro no onSnapshot do log:", error);
-      showToast("Erro ao carregar dados do dia.", "error");
-      setLoading(false);
-    });
 
-    return () => unsubscribe();
-  }, [user, currentScreen, dateString]);
+    // 2a. Perfil em tempo real
+    const profileRef = doc(db, 'artifacts', appId, 'users', user.uid);
+    const unsubProfile = onSnapshot(
+      profileRef,
+      (snap) => {
+        if (snap.exists()) {
+          setProfile(snap.data());
+        }
+      },
+      (error) => console.error('Erro no snapshot do perfil:', error)
+    );
+
+    // 2b. Banco de Refeições Frequentes (ordenado em memória por usageCount desc)
+    const savedMealsRef = collection(db, 'artifacts', appId, 'users', user.uid, 'saved_meals');
+    const unsubSavedMeals = onSnapshot(
+      savedMealsRef,
+      (snapshot) => {
+        const list = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+        list.sort((a, b) => {
+          const diffUsage = (b.usageCount || 0) - (a.usageCount || 0);
+          if (diffUsage !== 0) return diffUsage;
+          return (b.lastUsed || 0) - (a.lastUsed || 0);
+        });
+        setSavedMeals(list);
+      },
+      (error) => {
+        console.error('Erro ao carregar refeições frequentes:', error);
+      }
+    );
+
+    // 2c. Banco de Registros Diários (logs)
+    const logsRef = collection(db, 'artifacts', appId, 'users', user.uid, 'logs');
+    const unsubLogs = onSnapshot(
+      logsRef,
+      (snapshot) => {
+        const map = {};
+        snapshot.docs.forEach((d) => {
+          map[d.id] = { date: d.id, ...d.data() };
+        });
+        setAllLogsMap(map);
+        setLoading(false);
+      },
+      (error) => {
+        console.error('Erro ao carregar logs diários:', error);
+        showToast('Erro ao sincronizar histórico de refeições.', 'error');
+        setLoading(false);
+      }
+    );
+
+    // 2d. Banco de Evolução Corporal (weight_logs) - ordenado por data crescente
+    const weightLogsRef = collection(db, 'artifacts', appId, 'users', user.uid, 'weight_logs');
+    const unsubWeights = onSnapshot(
+      weightLogsRef,
+      (snapshot) => {
+        const list = snapshot.docs.map((d) => ({
+          id: d.id,
+          date: d.id,
+          ...d.data()
+        }));
+        list.sort((a, b) => a.date.localeCompare(b.date));
+        setWeightLogs(list);
+      },
+      (error) => {
+        console.error('Erro ao carregar pesagens:', error);
+      }
+    );
+
+    return () => {
+      unsubProfile();
+      unsubSavedMeals();
+      unsubLogs();
+      unsubWeights();
+    };
+  }, [user, currentScreen]);
 
   const loadProfile = async (uid) => {
     setLoading(true);
@@ -154,305 +316,339 @@ export default function App() {
       }
     } catch (e) {
       console.error(e);
-      showToast("Erro ao carregar perfil.", "error");
+      showToast('Erro ao carregar perfil.', 'error');
       setLoading(false);
     }
   };
 
+  // Log do dia selecionado atualmente na tela "Hoje"
+  const currentDayLog = useMemo(() => {
+    return (
+      allLogsMap[dateString] || {
+        date: dateString,
+        water: 0,
+        meals: [],
+        totals: { calories: 0, protein: 0, carbs: 0, fats: 0 }
+      }
+    );
+  }, [allLogsMap, dateString]);
+
+  // ==========================================
+  // AÇÕES DE ESCRITA NO FIRESTORE
+  // ==========================================
   const handleSaveProfile = async (profileData) => {
     if (!user) return;
     setLoading(true);
     try {
+      const today = getLocalDateString();
       await setDoc(doc(db, 'artifacts', appId, 'users', user.uid), profileData);
+      // Também cria o primeiro registro na coleção weight_logs
+      await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'weight_logs', today), {
+        date: today,
+        weight: Number(profileData.weight),
+        timestamp: Date.now()
+      });
       setProfile(profileData);
       setCurrentScreen('dashboard');
-      showToast("Perfil configurado com sucesso!", "success");
+      showToast('Perfil configurado com sucesso!', 'success');
     } catch (err) {
-      showToast(err.message, "error");
+      console.error(err);
+      showToast('Erro ao salvar perfil.', 'error');
     } finally {
       setLoading(false);
     }
   };
 
-  const saveWeight = async (newWeight) => {
+  const updateTargetWeight = async (newTargetWeight) => {
     if (!user || !profile) return;
-    const today = getLocalDateString();
-    const numWeight = Number(newWeight);
-    let updatedHistory = [...(profile.weightHistory || [])];
-
-    const existingIndex = updatedHistory.findIndex(entry => entry.date === today);
-    if (existingIndex >= 0) {
-      updatedHistory[existingIndex] = { date: today, weight: numWeight, timestamp: Date.now() };
-    } else {
-      updatedHistory.push({ date: today, weight: numWeight, timestamp: Date.now() });
+    const numericTarget = Number(newTargetWeight);
+    if (!numericTarget || numericTarget <= 0) {
+      showToast('Informe uma meta de peso válida.', 'error');
+      return;
     }
-    
-    updatedHistory.sort((a, b) => a.timestamp - b.timestamp);
-
     try {
       const profileRef = doc(db, 'artifacts', appId, 'users', user.uid);
-      await updateDoc(profileRef, { weight: numWeight, weightHistory: updatedHistory });
-      setProfile({ ...profile, weight: numWeight, weightHistory: updatedHistory });
-      setShowWeightModal(false);
-      showToast("Peso atualizado com sucesso!", "success");
+      await updateDoc(profileRef, { targetWeight: numericTarget });
+      setProfile((prev) => ({ ...prev, targetWeight: numericTarget }));
+      showToast(`Meta atualizada para ${numericTarget.toFixed(1)} kg!`, 'success');
     } catch (e) {
-      showToast("Erro ao salvar peso", "error");
+      console.error(e);
+      showToast('Erro ao atualizar meta de peso.', 'error');
     }
   };
 
   const addWater = async (amount) => {
-    if (!user || !todayLog) return;
+    if (!user) return;
     const logRef = doc(db, 'artifacts', appId, 'users', user.uid, 'logs', dateString);
+    const updatedWater = Math.max(0, (currentDayLog.water || 0) + amount);
     try {
-      await updateDoc(logRef, { water: todayLog.water + amount });
+      await setDoc(
+        logRef,
+        {
+          date: dateString,
+          water: updatedWater,
+          meals: currentDayLog.meals || [],
+          totals: currentDayLog.totals || { calories: 0, protein: 0, carbs: 0, fats: 0 }
+        },
+        { merge: true }
+      );
     } catch (e) {
       console.error(e);
-      showToast("Erro ao adicionar água.", "error");
+      showToast('Erro ao atualizar água.', 'error');
     }
   };
 
-  const saveMeal = async (mealData) => {
-    if (!user || !todayLog) return;
+  const computeTotals = (mealsList) => {
+    return mealsList.reduce(
+      (acc, m) => ({
+        calories: acc.calories + Math.round(Number(m.calories) || 0),
+        protein: acc.protein + Math.round(Number(m.protein) || 0),
+        carbs: acc.carbs + Math.round(Number(m.carbs) || 0),
+        fats: acc.fats + Math.round(Number(m.fats) || 0)
+      }),
+      { calories: 0, protein: 0, carbs: 0, fats: 0 }
+    );
+  };
+
+  const saveMealToDay = async (mealData, { saveToLibrary = false, existingSavedMeal = null } = {}) => {
+    if (!user) return;
     const logRef = doc(db, 'artifacts', appId, 'users', user.uid, 'logs', dateString);
-    
-    const newMeals = [...todayLog.meals, mealData];
-    const newTotals = {
-      calories: todayLog.totals.calories + mealData.calories,
-      protein: todayLog.totals.protein + mealData.protein,
-      carbs: todayLog.totals.carbs + mealData.carbs,
-      fats: todayLog.totals.fats + mealData.fats
+    const mealWithId = {
+      id: mealData.id || `meal_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      name: mealData.name,
+      calories: Math.round(Number(mealData.calories) || 0),
+      protein: Math.round(Number(mealData.protein) || 0),
+      carbs: Math.round(Number(mealData.carbs) || 0),
+      fats: Math.round(Number(mealData.fats) || 0),
+      section: mealData.section || selectedMealSection,
+      timestamp: Date.now()
     };
 
+    const newMeals = [...(currentDayLog.meals || []), mealWithId];
+    const newTotals = computeTotals(newMeals);
+
     try {
-      await updateDoc(logRef, { meals: newMeals, totals: newTotals });
+      await setDoc(
+        logRef,
+        {
+          date: dateString,
+          water: currentDayLog.water || 0,
+          meals: newMeals,
+          totals: newTotals
+        },
+        { merge: true }
+      );
+
+      // Atualiza ou cria no banco de refeições frequentes
+      if (existingSavedMeal) {
+        const savedRef = doc(db, 'artifacts', appId, 'users', user.uid, 'saved_meals', existingSavedMeal.id);
+        await updateDoc(savedRef, {
+          usageCount: (existingSavedMeal.usageCount || 1) + 1,
+          lastUsed: Date.now()
+        });
+      } else if (saveToLibrary) {
+        // Verifica se já existe uma refeição com o mesmo nome (case-insensitive)
+        const normalized = mealWithId.name.trim().toLowerCase();
+        const duplicate = savedMeals.find((m) => m.name.trim().toLowerCase() === normalized);
+        if (duplicate) {
+          const savedRef = doc(db, 'artifacts', appId, 'users', user.uid, 'saved_meals', duplicate.id);
+          await updateDoc(savedRef, {
+            calories: mealWithId.calories,
+            protein: mealWithId.protein,
+            carbs: mealWithId.carbs,
+            fats: mealWithId.fats,
+            defaultSection: mealWithId.section,
+            usageCount: (duplicate.usageCount || 1) + 1,
+            lastUsed: Date.now()
+          });
+        } else {
+          const savedColRef = collection(db, 'artifacts', appId, 'users', user.uid, 'saved_meals');
+          await addDoc(savedColRef, {
+            name: mealWithId.name,
+            calories: mealWithId.calories,
+            protein: mealWithId.protein,
+            carbs: mealWithId.carbs,
+            fats: mealWithId.fats,
+            defaultSection: mealWithId.section,
+            usageCount: 1,
+            lastUsed: Date.now()
+          });
+        }
+      }
+
       setShowMealModal(false);
-      showToast("Refeição adicionada!", "success");
+      showToast('Refeição registrada!', 'success');
     } catch (e) {
-      showToast("Erro ao salvar refeição", "error");
+      console.error(e);
+      showToast('Erro ao salvar refeição.', 'error');
     }
   };
 
+  const removeMealFromDay = async (mealIndexOrId) => {
+    if (!user) return;
+    const logRef = doc(db, 'artifacts', appId, 'users', user.uid, 'logs', dateString);
+    const currentMeals = currentDayLog.meals || [];
+    const newMeals = currentMeals.filter((m, idx) =>
+      m.id ? m.id !== mealIndexOrId : idx !== mealIndexOrId
+    );
+    const newTotals = computeTotals(newMeals);
+
+    try {
+      await setDoc(
+        logRef,
+        {
+          date: dateString,
+          water: currentDayLog.water || 0,
+          meals: newMeals,
+          totals: newTotals
+        },
+        { merge: true }
+      );
+      showToast('Refeição removida.', 'info');
+    } catch (e) {
+      console.error(e);
+      showToast('Erro ao remover refeição.', 'error');
+    }
+  };
+
+  const deleteSavedMeal = async (savedMealId) => {
+    if (!user) return;
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'saved_meals', savedMealId));
+      showToast('Refeição removida dos frequentes.', 'info');
+    } catch (e) {
+      console.error(e);
+      showToast('Erro ao remover refeição frequente.', 'error');
+    }
+  };
+
+  const saveWeightLog = async (weightValue, logDate) => {
+    if (!user || !profile) return;
+    const numericWeight = Number(weightValue);
+    if (!numericWeight || numericWeight <= 0) {
+      showToast('Informe um peso válido.', 'error');
+      return;
+    }
+    const targetDate = logDate || getLocalDateString();
+    try {
+      const weightRef = doc(db, 'artifacts', appId, 'users', user.uid, 'weight_logs', targetDate);
+      await setDoc(weightRef, {
+        date: targetDate,
+        weight: numericWeight,
+        timestamp: Date.now()
+      });
+
+      // Atualiza o peso atual no perfil se esta data for a mais recente ou igual à última
+      const latestExistingDate = weightLogs.length > 0 ? weightLogs[weightLogs.length - 1].date : '';
+      if (!latestExistingDate || targetDate >= latestExistingDate) {
+        const profileRef = doc(db, 'artifacts', appId, 'users', user.uid);
+        await updateDoc(profileRef, { weight: numericWeight });
+        setProfile((prev) => ({ ...prev, weight: numericWeight }));
+      }
+
+      showToast('Pesagem registrada com sucesso!', 'success');
+    } catch (e) {
+      console.error(e);
+      showToast('Erro ao salvar pesagem.', 'error');
+    }
+  };
+
+  const deleteWeightLog = async (logDate) => {
+    if (!user) return;
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'weight_logs', logDate));
+      const remaining = weightLogs.filter((w) => w.date !== logDate);
+      if (remaining.length > 0) {
+        const latest = remaining[remaining.length - 1];
+        await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid), { weight: latest.weight });
+      }
+      showToast('Registro de peso excluído.', 'info');
+    } catch (e) {
+      console.error(e);
+      showToast('Erro ao excluir pesagem.', 'error');
+    }
+  };
+
+  // ==========================================
+  // COMPONENTES DE UI AUXILIARES E MODAIS
+  // ==========================================
   const Toast = () => {
     if (!toast.show) return null;
     const colors = {
-      success: 'bg-green-900 border-green-500 text-green-100',
-      error: 'bg-red-900 border-red-500 text-red-100',
-      info: 'bg-slate-800 border-slate-600 text-slate-100'
+      success: 'bg-emerald-950/95 border-emerald-500/60 text-emerald-100',
+      error: 'bg-rose-950/95 border-rose-500/60 text-rose-100',
+      info: 'bg-slate-800/95 border-slate-600 text-slate-100'
     };
     const Icon = toast.type === 'success' ? Check : toast.type === 'error' ? AlertCircle : Info;
-    
+
     return (
-      <div className={`fixed top-4 left-1/2 transform -translate-x-1/2 z-50 flex items-center p-3 rounded-lg border shadow-lg ${colors[toast.type]} transition-all duration-300 min-w-[300px]`}>
-        <Icon className="w-5 h-5 mr-3" />
+      <div
+        className={`fixed top-4 left-1/2 transform -translate-x-1/2 z-50 flex items-center px-4 py-3 rounded-xl border shadow-2xl backdrop-blur-md ${colors[toast.type]} transition-all duration-300 max-w-[90vw] min-w-[280px]`}
+      >
+        <Icon className="w-5 h-5 mr-3 shrink-0" />
         <span className="text-sm font-medium">{toast.message}</span>
-      </div>
-    );
-  };
-
-  const WeightModal = () => {
-    const [inputWeight, setInputWeight] = useState(profile?.weight || '');
-    const [isSaving, setIsSaving] = useState(false);
-
-    if (!showWeightModal) return null;
-
-    const handleSave = async () => {
-      if (!inputWeight) return;
-      setIsSaving(true);
-      await saveWeight(inputWeight);
-      setIsSaving(false);
-    };
-
-    return (
-      <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-        <div className="bg-slate-900 border border-slate-700 w-full max-w-sm rounded-3xl p-6 shadow-2xl relative">
-          <button onClick={() => setShowWeightModal(false)} className="absolute top-4 right-4 text-slate-400 hover:text-white">
-            <X className="w-6 h-6" />
-          </button>
-          <h3 className="text-xl font-bold text-white mb-2 flex items-center gap-2">
-            <Scale className="text-indigo-400 w-5 h-5" /> Registrar Peso
-          </h3>
-          <p className="text-sm text-slate-400 mb-4">Acompanhe sua evolução e progressão de ganho.</p>
-          
-          <div className="flex items-center gap-2 mb-4">
-            <input
-              type="number"
-              step="0.1"
-              value={inputWeight}
-              onChange={(e) => setInputWeight(e.target.value)}
-              className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-4 text-white text-2xl font-bold text-center focus:outline-none focus:border-indigo-500"
-            />
-            <span className="text-slate-400 font-bold text-xl">kg</span>
-          </div>
-
-          <button
-            onClick={handleSave}
-            disabled={isSaving}
-            className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-50"
-          >
-            {isSaving ? 'Salvando...' : 'Salvar Peso'}
-          </button>
-        </div>
-      </div>
-    );
-  };
-
-  const MealModal = () => {
-    const [input, setInput] = useState('');
-    const [aiResult, setAiResult] = useState(null);
-    const [isAnalyzing, setIsAnalyzing] = useState(false);
-
-    const analyzeMeal = async () => {
-      if (!input.trim()) return showToast("Descreva o que você comeu.", "error");
-      setIsAnalyzing(true);
-      setAiResult(null);
-
-      const prompt = `Você é um nutricionista focado em ganho de densidade muscular e hipertrofia. Analise esta refeição: "${input}".
-      Estime os macronutrientes totais. 
-      Retorne APENAS um objeto JSON válido (sem blocos markdown como \`\`\`json) contendo exatamente estas chaves:
-      "name" (nome resumido da refeição), "calories" (número), "protein" (número em gramas), "carbs" (número em gramas), "fats" (número em gramas).`;
-
-      try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
-        const payload = {
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { responseMimeType: "application/json" }
-        };
-
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-
-        if (!response.ok) throw new Error("Falha na API");
-        const data = await response.json();
-        
-        let text = data.candidates[0].content.parts[0].text;
-        text = text.replace(/```json/g, '').replace(/```/g, '').trim();
-        const result = JSON.parse(text);
-
-        setAiResult({
-          name: result.name || 'Refeição Customizada',
-          calories: Math.round(Number(result.calories) || 0),
-          protein: Math.round(Number(result.protein) || 0),
-          carbs: Math.round(Number(result.carbs) || 0),
-          fats: Math.round(Number(result.fats) || 0),
-          section: selectedMealSection,
-          timestamp: Date.now()
-        });
-      } catch (err) {
-        console.error("AI Error:", err);
-        showToast("Falha ao analisar com IA. Tente novamente.", "error");
-      } finally {
-        setIsAnalyzing(false);
-      }
-    };
-
-    if (!showMealModal) return null;
-
-    return (
-      <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-40 flex items-end sm:items-center justify-center p-4">
-        <div className="bg-slate-900 border border-slate-700 w-full max-w-md rounded-3xl p-6 shadow-2xl relative">
-          <button onClick={() => setShowMealModal(false)} className="absolute top-4 right-4 text-slate-400 hover:text-white">
-            <X className="w-6 h-6" />
-          </button>
-          
-          <h3 className="text-xl font-bold text-white mb-2 flex items-center gap-2">
-            <Utensils className="text-emerald-400 w-5 h-5" /> Adicionar a {selectedMealSection}
-          </h3>
-          <p className="text-sm text-slate-400 mb-4">Descreva sua refeição e a IA do Gemini calculará os macros para você.</p>
-          
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            rows={3}
-            placeholder="Ex: 2 ovos mexidos, 1 fatia de pão integral e um café preto sem açúcar..."
-            className="w-full bg-slate-800 border border-slate-700 rounded-xl p-4 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 transition-colors mb-4 resize-none"
-          />
-
-          {!aiResult ? (
-            <button
-              onClick={analyzeMeal}
-              disabled={isAnalyzing}
-              className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-3.5 rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50"
-            >
-              {isAnalyzing ? (
-                <><BrainCircuit className="w-5 h-5 animate-pulse" /> Analisando com IA...</>
-              ) : (
-                <><BrainCircuit className="w-5 h-5" /> Calcular Macros (IA)</>
-              )}
-            </button>
-          ) : (
-            <div className="space-y-4">
-              <div className="bg-slate-800 border border-slate-700 rounded-xl p-4">
-                <h4 className="text-white font-semibold mb-3 pb-2 border-b border-slate-700">{aiResult.name}</h4>
-                <div className="grid grid-cols-4 gap-2 text-center">
-                  <div>
-                    <span className="block text-white font-bold text-lg">{aiResult.calories}</span>
-                    <span className="text-[10px] text-slate-400 uppercase tracking-wider">Kcal</span>
-                  </div>
-                  <div>
-                    <span className="block text-blue-400 font-bold text-lg">{aiResult.protein}g</span>
-                    <span className="text-[10px] text-slate-400 uppercase tracking-wider">Prot</span>
-                  </div>
-                  <div>
-                    <span className="block text-amber-400 font-bold text-lg">{aiResult.carbs}g</span>
-                    <span className="text-[10px] text-slate-400 uppercase tracking-wider">Carb</span>
-                  </div>
-                  <div>
-                    <span className="block text-rose-400 font-bold text-lg">{aiResult.fats}g</span>
-                    <span className="text-[10px] text-slate-400 uppercase tracking-wider">Gord</span>
-                  </div>
-                </div>
-              </div>
-              <div className="flex gap-2">
-                <button onClick={() => setAiResult(null)} className="flex-1 bg-slate-800 hover:bg-slate-700 text-white py-3 rounded-xl transition">Refazer</button>
-                <button onClick={() => saveMeal(aiResult)} className="flex-[2] bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-3 rounded-xl transition">Confirmar e Salvar</button>
-              </div>
-            </div>
-          )}
-        </div>
       </div>
     );
   };
 
   const SettingsModal = () => {
     const [tempKey, setTempKey] = useState(apiKey);
-    
     if (!showSettingsModal) return null;
 
     const saveSettings = () => {
-      setApiKey(tempKey);
-      localStorage.setItem('gemini_api_key', tempKey);
+      setApiKey(tempKey.trim());
+      try {
+        window.localStorage?.setItem('gemini_api_key', tempKey.trim());
+      } catch {
+        // Ignora caso storage não esteja disponível no iframe
+      }
       setShowSettingsModal(false);
-      showToast("Configurações salvas!", "success");
+      showToast('Configurações salvas!', 'success');
     };
 
     return (
       <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
         <div className="bg-slate-900 border border-slate-700 w-full max-w-sm rounded-3xl p-6 shadow-2xl relative">
+          <button
+            onClick={() => setShowSettingsModal(false)}
+            className="absolute top-4 right-4 text-slate-400 hover:text-white p-1"
+          >
+            <X className="w-5 h-5" />
+          </button>
           <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
-            <Settings className="text-slate-400 w-5 h-5" /> Configurações
+            <Settings className="text-emerald-400 w-5 h-5" /> Configurações
           </h3>
-          
+
           <div className="space-y-4">
             <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1 ml-1">Chave da API Gemini (Opcional)</label>
+              <label className="block text-xs font-medium text-slate-400 mb-1.5 ml-1">
+                Chave da API Gemini (Opcional)
+              </label>
               <input
                 type="password"
                 value={tempKey}
                 onChange={(e) => setTempKey(e.target.value)}
-                placeholder="Insira sua API Key..."
-                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                placeholder="Insira sua API Key do Gemini..."
+                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 text-sm"
               />
-              <p className="text-[10px] text-slate-500 mt-2">
-                Se deixado em branco, o sistema tentará usar a chave padrão do ambiente (Canvas).
+              <p className="text-[11px] text-slate-500 mt-2 leading-relaxed">
+                Se deixado em branco, o aplicativo utilizará a chave padrão do ambiente.
               </p>
             </div>
-            
-            <div className="flex gap-2 pt-4">
-              <button onClick={() => setShowSettingsModal(false)} className="flex-1 bg-slate-800 hover:bg-slate-700 text-white py-3 rounded-xl transition">Cancelar</button>
-              <button onClick={saveSettings} className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 rounded-xl transition">Salvar</button>
+
+            <div className="flex gap-2 pt-2">
+              <button
+                onClick={() => setShowSettingsModal(false)}
+                className="flex-1 bg-slate-800 hover:bg-slate-700 text-white py-3 rounded-xl transition text-sm font-medium"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={saveSettings}
+                className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-3 rounded-xl transition text-sm"
+              >
+                Salvar
+              </button>
             </div>
           </div>
         </div>
@@ -460,6 +656,469 @@ export default function App() {
     );
   };
 
+  // ==========================================
+  // MODAL DE ADICIONAR REFEIÇÃO (3 ABAS)
+  // ==========================================
+  const MealModal = () => {
+    const [modalTab, setModalTab] = useState(savedMeals.length > 0 ? 'frequent' : 'ai');
+    const [searchQuery, setSearchQuery] = useState('');
+
+    // Estado da Aba IA
+    const [aiInput, setAiInput] = useState('');
+    const [aiResult, setAiResult] = useState(null);
+    const [isAnalyzing, setIsAnalyzing] = useState(false);
+    const [saveAiToLibrary, setSaveAiToLibrary] = useState(true);
+
+    // Estado da Aba Manual
+    const [manualForm, setManualForm] = useState({
+      name: '',
+      calories: '',
+      protein: '',
+      carbs: '',
+      fats: ''
+    });
+    const [saveManualToLibrary, setSaveManualToLibrary] = useState(true);
+
+    // Sugestões inteligentes e filtragem para a aba Frequentes
+    const { smartSuggestions, filteredMeals } = useMemo(() => {
+      const q = searchQuery.trim().toLowerCase();
+      const filtered = savedMeals.filter((m) =>
+        !q || m.name.toLowerCase().includes(q)
+      );
+
+      // Prioriza refeições da mesma seção e com maior usageCount
+      const suggestions = [...savedMeals]
+        .sort((a, b) => {
+          const aMatch = a.defaultSection === selectedMealSection ? 1 : 0;
+          const bMatch = b.defaultSection === selectedMealSection ? 1 : 0;
+          if (aMatch !== bMatch) return bMatch - aMatch;
+          return (b.usageCount || 0) - (a.usageCount || 0);
+        })
+        .slice(0, 3);
+
+      return { smartSuggestions: suggestions, filteredMeals: filtered };
+    }, [savedMeals, searchQuery, selectedMealSection]);
+
+    const analyzeMealWithAI = async () => {
+      if (!aiInput.trim()) return showToast('Descreva o que você comeu.', 'error');
+      setIsAnalyzing(true);
+      setAiResult(null);
+
+      const prompt = `Você é um nutricionista esportivo pragmático focado em hipertrofia e precisão nutricional.
+Analise esta refeição: "${aiInput}".
+Estime os macronutrientes totais.
+Retorne APENAS um objeto JSON válido (sem blocos markdown) contendo exatamente estas chaves:
+"name" (nome resumido e claro da refeição em português), "calories" (número inteiro), "protein" (número inteiro em gramas), "carbs" (número inteiro em gramas), "fats" (número inteiro em gramas).`;
+
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
+        const payload = {
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { responseMimeType: 'application/json' }
+        };
+
+        const data = await fetchGeminiWithBackoff(url, payload);
+        let text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!text) throw new Error('Resposta vazia da IA');
+
+        text = text.replace(/```json/g, '').replace(/```/g, '').trim();
+        const result = JSON.parse(text);
+
+        setAiResult({
+          name: result.name || 'Refeição Analisada',
+          calories: Math.round(Number(result.calories) || 0),
+          protein: Math.round(Number(result.protein) || 0),
+          carbs: Math.round(Number(result.carbs) || 0),
+          fats: Math.round(Number(result.fats) || 0),
+          section: selectedMealSection
+        });
+      } catch (err) {
+        console.error('AI Error:', err);
+        showToast('Falha ao analisar com IA. Verifique sua conexão ou chave de API.', 'error');
+      } finally {
+        setIsAnalyzing(false);
+      }
+    };
+
+    const handleManualSubmit = (e) => {
+      e.preventDefault();
+      if (!manualForm.name.trim() || manualForm.calories === '') {
+        return showToast('Informe pelo menos o nome e as calorias.', 'error');
+      }
+      saveMealToDay(
+        {
+          name: manualForm.name.trim(),
+          calories: Number(manualForm.calories) || 0,
+          protein: Number(manualForm.protein) || 0,
+          carbs: Number(manualForm.carbs) || 0,
+          fats: Number(manualForm.fats) || 0,
+          section: selectedMealSection
+        },
+        { saveToLibrary: saveManualToLibrary }
+      );
+    };
+
+    if (!showMealModal) return null;
+
+    return (
+      <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-40 flex items-end sm:items-center justify-center p-0 sm:p-4">
+        <div className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-t-3xl sm:rounded-3xl p-5 shadow-2xl relative max-h-[90vh] flex flex-col">
+          {/* Cabeçalho do Modal */}
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                <Utensils className="text-emerald-400 w-5 h-5" />
+                {selectedMealSection}
+              </h3>
+              <p className="text-xs text-slate-400">Adicione rapidamente ou calcule com IA</p>
+            </div>
+            <button
+              onClick={() => setShowMealModal(false)}
+              className="text-slate-400 hover:text-white p-2 rounded-full bg-slate-800/70"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          {/* Seletor de 3 Abas */}
+          <div className="grid grid-cols-3 gap-1.5 bg-slate-950 p-1 rounded-2xl border border-slate-800 mb-4 shrink-0">
+            <button
+              onClick={() => setModalTab('frequent')}
+              className={`py-2 px-2 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition ${
+                modalTab === 'frequent'
+                  ? 'bg-emerald-500 text-slate-950 shadow'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Bookmark className="w-3.5 h-3.5" /> Frequentes
+            </button>
+            <button
+              onClick={() => setModalTab('ai')}
+              className={`py-2 px-2 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition ${
+                modalTab === 'ai'
+                  ? 'bg-emerald-500 text-slate-950 shadow'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <BrainCircuit className="w-3.5 h-3.5" /> IA (Gemini)
+            </button>
+            <button
+              onClick={() => setModalTab('manual')}
+              className={`py-2 px-2 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition ${
+                modalTab === 'manual'
+                  ? 'bg-emerald-500 text-slate-950 shadow'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Edit3 className="w-3.5 h-3.5" /> Manual
+            </button>
+          </div>
+
+          {/* Conteúdo rolável */}
+          <div className="overflow-y-auto flex-1 pr-0.5 space-y-4">
+            {/* ABA 1: FREQUENTES */}
+            {modalTab === 'frequent' && (
+              <div className="space-y-4">
+                <div className="relative">
+                  <Search className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Buscar refeição salva..."
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-4 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+
+                {savedMeals.length === 0 ? (
+                  <div className="text-center py-8 px-4 bg-slate-950/60 rounded-2xl border border-slate-800/80">
+                    <Bookmark className="w-8 h-8 text-slate-600 mx-auto mb-2" />
+                    <p className="text-sm font-medium text-slate-300">Nenhuma refeição frequente ainda</p>
+                    <p className="text-xs text-slate-500 mt-1 mb-4">
+                      Use a aba IA ou Manual e marque "Salvar nas frequentes" para registrar com 1 clique da próxima vez.
+                    </p>
+                    <button
+                      onClick={() => setModalTab('ai')}
+                      className="bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25 px-4 py-2 rounded-xl text-xs font-semibold transition"
+                    >
+                      Calcular primeira com IA
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    {/* Sugestões Inteligentes */}
+                    {!searchQuery && smartSuggestions.length > 0 && (
+                      <div>
+                        <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-emerald-400 mb-2 px-1">
+                          <Sparkles className="w-3.5 h-3.5" /> Sugestões para {selectedMealSection}
+                        </div>
+                        <div className="space-y-2">
+                          {smartSuggestions.map((meal) => (
+                            <div
+                              key={`sug-${meal.id}`}
+                              className="p-3 bg-emerald-500/5 border border-emerald-500/25 rounded-2xl flex items-center justify-between gap-2"
+                            >
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2">
+                                  <p className="text-sm font-semibold text-white truncate">{meal.name}</p>
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-emerald-500/15 text-emerald-300 shrink-0">
+                                    {meal.usageCount || 1}x
+                                  </span>
+                                </div>
+                                <p className="text-[11px] text-slate-400 mt-0.5">
+                                  <strong className="text-slate-200">{meal.calories} kcal</strong> • P:{meal.protein}g • C:{meal.carbs}g • G:{meal.fats}g
+                                </p>
+                              </div>
+                              <button
+                                onClick={() =>
+                                  saveMealToDay(
+                                    { ...meal, section: selectedMealSection },
+                                    { existingSavedMeal: meal }
+                                  )
+                                }
+                                className="px-3 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs rounded-xl transition shrink-0 flex items-center gap-1"
+                              >
+                                <Plus className="w-3.5 h-3.5" /> Adicionar
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Todas as Refeições Frequentes */}
+                    <div>
+                      <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-2 px-1">
+                        Sua Biblioteca ({filteredMeals.length})
+                      </div>
+                      <div className="space-y-2">
+                        {filteredMeals.length === 0 ? (
+                          <p className="text-xs text-slate-500 text-center py-4">
+                            Nenhuma refeição encontrada para "{searchQuery}".
+                          </p>
+                        ) : (
+                          filteredMeals.map((meal) => (
+                            <div
+                              key={meal.id}
+                              className="p-3 bg-slate-950 border border-slate-800 rounded-2xl flex items-center justify-between gap-2"
+                            >
+                              <div className="min-w-0 flex-1">
+                                <p className="text-sm font-medium text-slate-200 truncate">{meal.name}</p>
+                                <p className="text-[11px] text-slate-400 mt-0.5">
+                                  {meal.calories} kcal • P:{meal.protein}g • C:{meal.carbs}g • G:{meal.fats}g
+                                </p>
+                              </div>
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <button
+                                  onClick={() => deleteSavedMeal(meal.id)}
+                                  title="Excluir dos frequentes"
+                                  className="p-2 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-xl transition"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                                <button
+                                  onClick={() =>
+                                    saveMealToDay(
+                                      { ...meal, section: selectedMealSection },
+                                      { existingSavedMeal: meal }
+                                    )
+                                  }
+                                  className="p-2 bg-emerald-500/15 hover:bg-emerald-500 text-emerald-400 hover:text-slate-950 rounded-xl transition"
+                                  title="Adicionar ao dia"
+                                >
+                                  <Plus className="w-4 h-4" />
+                                </button>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* ABA 2: IA (GEMINI) */}
+            {modalTab === 'ai' && (
+              <div className="space-y-4">
+                <p className="text-xs text-slate-400">
+                  Descreva o que você comeu com quantidades aproximadas para a IA estimar os macros.
+                </p>
+                <textarea
+                  value={aiInput}
+                  onChange={(e) => setAiInput(e.target.value)}
+                  rows={3}
+                  placeholder="Ex: 150g de arroz branco, 150g de peito de frango grelhado, 1 concha de feijão e 1 colher de azeite..."
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 transition-colors resize-none"
+                />
+
+                {!aiResult ? (
+                  <button
+                    onClick={analyzeMealWithAI}
+                    disabled={isAnalyzing}
+                    className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-3.5 rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    {isAnalyzing ? (
+                      <>
+                        <BrainCircuit className="w-5 h-5 animate-pulse" /> Analisando com IA...
+                      </>
+                    ) : (
+                      <>
+                        <BrainCircuit className="w-5 h-5" /> Calcular Macros (IA)
+                      </>
+                    )}
+                  </button>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="bg-slate-950 border border-slate-800 rounded-2xl p-4">
+                      <h4 className="text-white font-semibold mb-3 pb-2 border-b border-slate-800 text-sm">
+                        {aiResult.name}
+                      </h4>
+                      <div className="grid grid-cols-4 gap-2 text-center">
+                        <div>
+                          <span className="block text-white font-bold text-lg">{aiResult.calories}</span>
+                          <span className="text-[10px] text-slate-400 uppercase tracking-wider">Kcal</span>
+                        </div>
+                        <div>
+                          <span className="block text-blue-400 font-bold text-lg">{aiResult.protein}g</span>
+                          <span className="text-[10px] text-slate-400 uppercase tracking-wider">Prot</span>
+                        </div>
+                        <div>
+                          <span className="block text-amber-400 font-bold text-lg">{aiResult.carbs}g</span>
+                          <span className="text-[10px] text-slate-400 uppercase tracking-wider">Carb</span>
+                        </div>
+                        <div>
+                          <span className="block text-rose-400 font-bold text-lg">{aiResult.fats}g</span>
+                          <span className="text-[10px] text-slate-400 uppercase tracking-wider">Gord</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <label className="flex items-center gap-3 p-3 bg-slate-950/70 border border-slate-800 rounded-xl cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={saveAiToLibrary}
+                        onChange={(e) => setSaveAiToLibrary(e.target.checked)}
+                        className="w-4 h-4 accent-emerald-500 rounded"
+                      />
+                      <span className="text-xs text-slate-300">
+                        Salvar no banco de refeições frequentes
+                      </span>
+                    </label>
+
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => setAiResult(null)}
+                        className="flex-1 bg-slate-800 hover:bg-slate-700 text-white py-3 rounded-xl transition text-sm font-medium"
+                      >
+                        Refazer
+                      </button>
+                      <button
+                        onClick={() => saveMealToDay(aiResult, { saveToLibrary: saveAiToLibrary })}
+                        className="flex-[2] bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-3 rounded-xl transition text-sm"
+                      >
+                        Confirmar e Salvar
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ABA 3: MANUAL */}
+            {modalTab === 'manual' && (
+              <form onSubmit={handleManualSubmit} className="space-y-3.5">
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1 ml-1">Nome da Refeição</label>
+                  <input
+                    type="text"
+                    required
+                    value={manualForm.name}
+                    onChange={(e) => setManualForm({ ...manualForm, name: e.target.value })}
+                    placeholder="Ex: Vitamina de Banana com Aveia e Whey"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1 ml-1">Calorias (kcal)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      required
+                      value={manualForm.calories}
+                      onChange={(e) => setManualForm({ ...manualForm, calories: e.target.value })}
+                      placeholder="450"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-blue-400 mb-1 ml-1">Proteína (g)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={manualForm.protein}
+                      onChange={(e) => setManualForm({ ...manualForm, protein: e.target.value })}
+                      placeholder="35"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-amber-400 mb-1 ml-1">Carboidratos (g)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={manualForm.carbs}
+                      onChange={(e) => setManualForm({ ...manualForm, carbs: e.target.value })}
+                      placeholder="55"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-rose-400 mb-1 ml-1">Gorduras (g)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={manualForm.fats}
+                      onChange={(e) => setManualForm({ ...manualForm, fats: e.target.value })}
+                      placeholder="10"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+                </div>
+
+                <label className="flex items-center gap-3 p-3 bg-slate-950/70 border border-slate-800 rounded-xl cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={saveManualToLibrary}
+                    onChange={(e) => setSaveManualToLibrary(e.target.checked)}
+                    className="w-4 h-4 accent-emerald-500 rounded"
+                  />
+                  <span className="text-xs text-slate-300">Salvar nas refeições frequentes</span>
+                </label>
+
+                <button
+                  type="submit"
+                  className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-3.5 rounded-xl transition text-sm"
+                >
+                  Adicionar Refeição
+                </button>
+              </form>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // ==========================================
+  // TELA DE AUTENTICAÇÃO
+  // ==========================================
   const AuthScreen = () => {
     const [isLogin, setIsLogin] = useState(true);
     const [email, setEmail] = useState('');
@@ -467,7 +1126,7 @@ export default function App() {
 
     const handleEmailAuth = async (e) => {
       e.preventDefault();
-      if (!email || !password) return showToast("Preencha todos os campos.", "error");
+      if (!email || !password) return showToast('Preencha todos os campos.', 'error');
       setLoading(true);
       try {
         if (isLogin) {
@@ -476,54 +1135,78 @@ export default function App() {
           await createUserWithEmailAndPassword(auth, email, password);
         }
       } catch (err) {
-        showToast(err.message, "error");
+        showToast(err.message, 'error');
         setLoading(false);
       }
     };
 
     const handleGuest = async () => {
       setLoading(true);
-      try { await signInAnonymously(auth); } 
-      catch (err) { showToast(err.message, "error"); setLoading(false); }
+      try {
+        await signInAnonymously(auth);
+      } catch (err) {
+        showToast(err.message, 'error');
+        setLoading(false);
+      }
     };
 
     return (
       <div className="min-h-screen bg-slate-950 flex flex-col justify-center items-center p-6 relative overflow-hidden">
-        <div className="absolute top-0 left-0 w-full h-96 bg-gradient-to-b from-emerald-500/20 to-transparent blur-3xl pointer-events-none"></div>
-        
+        <div className="absolute top-0 left-0 w-full h-96 bg-gradient-to-b from-emerald-500/20 to-transparent blur-3xl pointer-events-none" />
+
         <div className="w-full max-w-md z-10">
           <div className="text-center mb-10">
             <div className="w-20 h-20 bg-slate-900 border border-emerald-500/30 rounded-2xl mx-auto flex items-center justify-center text-emerald-400 mb-6 shadow-[0_0_40px_rgba(16,185,129,0.2)]">
               <Activity className="w-10 h-10" />
             </div>
-            <h1 className="text-3xl font-extrabold text-white mb-2">NutriFit <span className="text-emerald-400">AI</span></h1>
-            <p className="text-slate-400">Seu parceiro inteligente de nutrição.</p>
+            <h1 className="text-3xl font-extrabold text-white mb-2">
+              NutriFit <span className="text-emerald-400">AI</span>
+            </h1>
+            <p className="text-slate-400">Seu consultor inteligente de nutrição e evolução.</p>
           </div>
 
           <form onSubmit={handleEmailAuth} className="space-y-4">
-            <div>
-              <input type="email" placeholder="Seu E-mail" value={email} onChange={e=>setEmail(e.target.value)} className="w-full bg-slate-900 border border-slate-800 rounded-xl px-4 py-4 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 transition-colors" />
-            </div>
-            <div>
-              <input type="password" placeholder="Sua Senha" value={password} onChange={e=>setPassword(e.target.value)} className="w-full bg-slate-900 border border-slate-800 rounded-xl px-4 py-4 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 transition-colors" />
-            </div>
-            <button type="submit" className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-lg py-4 rounded-xl transition-all shadow-[0_4px_20px_rgba(16,185,129,0.3)]">
+            <input
+              type="email"
+              placeholder="Seu E-mail"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full bg-slate-900 border border-slate-800 rounded-xl px-4 py-4 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 transition-colors"
+            />
+            <input
+              type="password"
+              placeholder="Sua Senha"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full bg-slate-900 border border-slate-800 rounded-xl px-4 py-4 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 transition-colors"
+            />
+            <button
+              type="submit"
+              className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-lg py-4 rounded-xl transition-all shadow-[0_4px_20px_rgba(16,185,129,0.3)]"
+            >
               {isLogin ? 'Entrar' : 'Criar Conta'}
             </button>
           </form>
 
           <div className="mt-6 flex flex-col gap-4">
-            <button type="button" onClick={() => setIsLogin(!isLogin)} className="text-slate-400 text-sm hover:text-white transition">
+            <button
+              type="button"
+              onClick={() => setIsLogin(!isLogin)}
+              className="text-slate-400 text-sm hover:text-white transition"
+            >
               {isLogin ? 'Não tem uma conta? Cadastre-se' : 'Já tem conta? Faça login'}
             </button>
-            
+
             <div className="relative flex py-2 items-center">
-                <div className="flex-grow border-t border-slate-800"></div>
-                <span className="flex-shrink-0 mx-4 text-slate-600 text-xs uppercase font-semibold">OU</span>
-                <div className="flex-grow border-t border-slate-800"></div>
+              <div className="flex-grow border-t border-slate-800" />
+              <span className="flex-shrink-0 mx-4 text-slate-600 text-xs uppercase font-semibold">OU</span>
+              <div className="flex-grow border-t border-slate-800" />
             </div>
 
-            <button onClick={handleGuest} className="w-full bg-slate-800 hover:bg-slate-700 text-white font-medium py-3.5 rounded-xl transition-all border border-slate-700 flex justify-center items-center gap-2">
+            <button
+              onClick={handleGuest}
+              className="w-full bg-slate-800 hover:bg-slate-700 text-white font-medium py-3.5 rounded-xl transition-all border border-slate-700 flex justify-center items-center gap-2"
+            >
               <User className="w-4 h-4" /> Entrar como Convidado
             </button>
           </div>
@@ -532,23 +1215,41 @@ export default function App() {
     );
   };
 
+  // ==========================================
+  // TELA DE ONBOARDING
+  // ==========================================
   const OnboardingScreen = () => {
     const [formData, setFormData] = useState({
-      weight: 65, targetWeight: 75, height: 170, age: 30, gender: 'male', activity: 1.2, goal: 'gain'
+      weight: 65,
+      targetWeight: 75,
+      height: 175,
+      age: 28,
+      gender: 'male',
+      activity: 1.55,
+      goal: 'gain'
     });
 
     const handleSubmit = (e) => {
       e.preventDefault();
       const targets = calculateTargets(
-        Number(formData.weight), Number(formData.height), Number(formData.age),
-        formData.gender, Number(formData.activity), formData.goal
+        Number(formData.weight),
+        Number(formData.height),
+        Number(formData.age),
+        formData.gender,
+        Number(formData.activity),
+        formData.goal
       );
-      
-      const completeProfile = { 
-        ...formData, 
-        targets, 
-        weightHistory: [{ date: getLocalDateString(), weight: Number(formData.weight), timestamp: Date.now() }],
-        createdAt: new Date().toISOString() 
+
+      const completeProfile = {
+        weight: Number(formData.weight),
+        targetWeight: Number(formData.targetWeight),
+        height: Number(formData.height),
+        age: Number(formData.age),
+        gender: formData.gender,
+        activity: Number(formData.activity),
+        goal: formData.goal,
+        targets,
+        createdAt: new Date().toISOString()
       };
       handleSaveProfile(completeProfile);
     };
@@ -557,46 +1258,82 @@ export default function App() {
       <div className="min-h-screen bg-slate-950 text-white p-6 pb-24 overflow-y-auto">
         <div className="max-w-md mx-auto">
           <h2 className="text-2xl font-bold mb-2 pt-6">Configure seu Perfil</h2>
-          <p className="text-slate-400 text-sm mb-8">Vamos calcular suas necessidades metabólicas ideais para o seu objetivo.</p>
-          
-          <form onSubmit={handleSubmit} className="space-y-6">
+          <p className="text-slate-400 text-sm mb-8">
+            Vamos calcular suas necessidades metabólicas e configurar sua meta de peso.
+          </p>
+
+          <form onSubmit={handleSubmit} className="space-y-5">
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1">
                 <label className="text-xs text-slate-400 ml-1">Peso Atual (kg)</label>
-                <input type="number" step="0.1" required value={formData.weight} onChange={e=>setFormData({...formData, weight: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 outline-none" />
+                <input
+                  type="number"
+                  step="0.1"
+                  required
+                  value={formData.weight}
+                  onChange={(e) => setFormData({ ...formData, weight: e.target.value })}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 outline-none"
+                />
               </div>
               <div className="space-y-1">
-                <label className="text-xs text-slate-400 ml-1">Meta de Peso (kg)</label>
-                <input type="number" step="0.1" required value={formData.targetWeight} onChange={e=>setFormData({...formData, targetWeight: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 outline-none" />
+                <label className="text-xs text-emerald-400 ml-1 font-medium">Meta de Peso (kg)</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  required
+                  value={formData.targetWeight}
+                  onChange={(e) => setFormData({ ...formData, targetWeight: e.target.value })}
+                  className="w-full bg-slate-900 border border-emerald-500/50 rounded-xl px-4 py-3 focus:border-emerald-400 outline-none"
+                />
               </div>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1">
                 <label className="text-xs text-slate-400 ml-1">Altura (cm)</label>
-                <input type="number" required value={formData.height} onChange={e=>setFormData({...formData, height: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 outline-none" />
+                <input
+                  type="number"
+                  required
+                  value={formData.height}
+                  onChange={(e) => setFormData({ ...formData, height: e.target.value })}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 outline-none"
+                />
               </div>
               <div className="space-y-1">
                 <label className="text-xs text-slate-400 ml-1">Idade</label>
-                <input type="number" required value={formData.age} onChange={e=>setFormData({...formData, age: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 outline-none" />
+                <input
+                  type="number"
+                  required
+                  value={formData.age}
+                  onChange={(e) => setFormData({ ...formData, age: e.target.value })}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 outline-none"
+                />
               </div>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1">
                 <label className="text-xs text-slate-400 ml-1">Gênero</label>
-                <select value={formData.gender} onChange={e=>setFormData({...formData, gender: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 outline-none">
+                <select
+                  value={formData.gender}
+                  onChange={(e) => setFormData({ ...formData, gender: e.target.value })}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 outline-none"
+                >
                   <option value="male">Masculino</option>
                   <option value="female">Feminino</option>
                 </select>
               </div>
               <div className="space-y-1">
-                <label className="text-xs text-slate-400 ml-1">Nível de Atividade Física</label>
-                <select value={formData.activity} onChange={e=>setFormData({...formData, activity: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 outline-none">
-                  <option value="1.2">Sedentário (Trabalho de escritório)</option>
-                  <option value="1.375">Leve (1-2 dias/semana)</option>
-                  <option value="1.55">Moderado (3-5 dias/semana)</option>
-                  <option value="1.725">Intenso (6-7 dias/semana)</option>
+                <label className="text-xs text-slate-400 ml-1">Atividade Física</label>
+                <select
+                  value={formData.activity}
+                  onChange={(e) => setFormData({ ...formData, activity: e.target.value })}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 outline-none"
+                >
+                  <option value="1.2">Sedentário</option>
+                  <option value="1.375">Leve (1-2x/sem)</option>
+                  <option value="1.55">Moderado (3-5x/sem)</option>
+                  <option value="1.725">Intenso (6-7x/sem)</option>
                 </select>
               </div>
             </div>
@@ -604,31 +1341,37 @@ export default function App() {
             <div className="space-y-2">
               <label className="text-xs text-slate-400 ml-1">Objetivo Principal</label>
               <div className="grid grid-cols-3 gap-3">
-                <label className="cursor-pointer">
-                  <input type="radio" name="goal" value="loss" checked={formData.goal === 'loss'} onChange={e=>setFormData({...formData, goal: e.target.value})} className="peer sr-only" />
-                  <div className="p-4 rounded-xl border border-slate-700 bg-slate-900 peer-checked:border-emerald-500 peer-checked:bg-emerald-500/10 text-center transition-all">
-                    <TrendingDown className={`w-6 h-6 mx-auto mb-2 ${formData.goal === 'loss' ? 'text-emerald-400' : 'text-slate-500'}`} />
-                    <span className="text-xs font-medium">Perder</span>
-                  </div>
-                </label>
-                <label className="cursor-pointer">
-                  <input type="radio" name="goal" value="maintain" checked={formData.goal === 'maintain'} onChange={e=>setFormData({...formData, goal: e.target.value})} className="peer sr-only" />
-                  <div className="p-4 rounded-xl border border-slate-700 bg-slate-900 peer-checked:border-emerald-500 peer-checked:bg-emerald-500/10 text-center transition-all">
-                    <Minus className={`w-6 h-6 mx-auto mb-2 ${formData.goal === 'maintain' ? 'text-emerald-400' : 'text-slate-500'}`} />
-                    <span className="text-xs font-medium">Manter</span>
-                  </div>
-                </label>
-                <label className="cursor-pointer">
-                  <input type="radio" name="goal" value="gain" checked={formData.goal === 'gain'} onChange={e=>setFormData({...formData, goal: e.target.value})} className="peer sr-only" />
-                  <div className="p-4 rounded-xl border border-slate-700 bg-slate-900 peer-checked:border-emerald-500 peer-checked:bg-emerald-500/10 text-center transition-all">
-                    <TrendingUp className={`w-6 h-6 mx-auto mb-2 ${formData.goal === 'gain' ? 'text-emerald-400' : 'text-slate-500'}`} />
-                    <span className="text-xs font-medium">Ganhar</span>
-                  </div>
-                </label>
+                {[
+                  { id: 'loss', label: 'Perder', Icon: TrendingDown },
+                  { id: 'maintain', label: 'Manter', Icon: Minus },
+                  { id: 'gain', label: 'Ganhar', Icon: TrendingUp }
+                ].map(({ id, label, Icon }) => (
+                  <label key={id} className="cursor-pointer">
+                    <input
+                      type="radio"
+                      name="goal"
+                      value={id}
+                      checked={formData.goal === id}
+                      onChange={(e) => setFormData({ ...formData, goal: e.target.value })}
+                      className="peer sr-only"
+                    />
+                    <div className="p-4 rounded-xl border border-slate-700 bg-slate-900 peer-checked:border-emerald-500 peer-checked:bg-emerald-500/10 text-center transition-all">
+                      <Icon
+                        className={`w-6 h-6 mx-auto mb-2 ${
+                          formData.goal === id ? 'text-emerald-400' : 'text-slate-500'
+                        }`}
+                      />
+                      <span className="text-xs font-medium">{label}</span>
+                    </div>
+                  </label>
+                ))}
               </div>
             </div>
 
-            <button type="submit" className="w-full mt-8 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-4 rounded-xl transition-all shadow-[0_4px_20px_rgba(16,185,129,0.3)]">
+            <button
+              type="submit"
+              className="w-full mt-6 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-4 rounded-xl transition-all shadow-[0_4px_20px_rgba(16,185,129,0.3)]"
+            >
               Gerar Plano Nutricional
             </button>
           </form>
@@ -637,268 +1380,1014 @@ export default function App() {
     );
   };
 
-  const DashboardScreen = () => {
-    if (!profile || !todayLog) return null;
-
+  // ==========================================
+  // ABA 1: HOJE (DASHBOARD DIÁRIO)
+  // ==========================================
+  const TodayView = () => {
+    const todayStr = getLocalDateString();
+    const isToday = dateString === todayStr;
     const t = profile.targets;
-    const c = todayLog.totals;
+    const c = currentDayLog.totals || { calories: 0, protein: 0, carbs: 0, fats: 0 };
     const remainingCals = Math.max(0, t.calories - c.calories);
-    const calPercent = Math.min(100, (c.calories / t.calories) * 100);
+    const calPercent = Math.min(100, (c.calories / Math.max(1, t.calories)) * 100);
     const strokeDashoffset = 283 - (283 * calPercent) / 100;
 
-    // Lógica Evolução Corporal
-    const history = profile.weightHistory || [];
-    let paceText = "Primeira pesagem registrada";
-    let paceColor = "text-slate-400";
-    
-    if (history.length >= 2) {
-      const last = history[history.length - 1].weight;
-      const prev = history[history.length - 2].weight;
-      const diff = (last - prev) * 1000;
-      if (diff > 0) {
-        paceText = `+${Math.round(diff)}g desde a última pesagem`;
-        paceColor = "text-emerald-400";
-      } else if (diff < 0) {
-        paceText = `${Math.round(diff)}g desde a última pesagem`;
-        paceColor = "text-rose-400";
-      } else {
-        paceText = "Peso mantido desde a última pesagem";
-        paceColor = "text-slate-400";
-      }
-    }
-
-    // Mini Gráfico SVG
-    const weights = history.map(h => h.weight);
-    const targetW = profile.targetWeight || 75;
-    const minW = Math.min(...weights, targetW) - 1;
-    const maxW = Math.max(...weights, targetW) + 1;
-    const range = maxW - minW || 1;
-
-    const points = history.map((h, i) => {
-      const x = history.length > 1 ? (i / (history.length - 1)) * 100 : 50;
-      const y = 100 - ((h.weight - minW) / range) * 100;
-      return `${x},${y}`;
-    }).join(' ');
-    
-    const targetY = 100 - ((targetW - minW) / range) * 100;
-
-    const mealSections = [
-      { name: 'Café da Manhã', icon: Coffee, color: 'text-amber-400' },
-      { name: 'Lanche da Manhã', icon: Apple, color: 'text-red-400' },
-      { name: 'Almoço', icon: Utensils, color: 'text-orange-500' },
-      { name: 'Lanche da Tarde', icon: Sun, color: 'text-yellow-500' },
-      { name: 'Jantar', icon: Moon, color: 'text-indigo-400' },
-      { name: 'Outros', icon: Plus, color: 'text-slate-400' },
-    ];
-
     return (
-      <div className="min-h-screen bg-slate-950 text-white flex flex-col relative pb-24">
-        <header className="sticky top-0 z-10 bg-slate-950/80 backdrop-blur-lg border-b border-slate-800 p-5 flex justify-between items-center">
-          <div>
-            <h1 className="text-xl font-bold flex items-center gap-2">
-              <Activity className="text-emerald-400 w-6 h-6" /> Hoje
-            </h1>
-            <p className="text-xs text-slate-400 mt-1 capitalize">
-              {new Date(dateString + 'T12:00:00').toLocaleDateString('pt-BR', { weekday: 'long', day: '2-digit', month: 'long' })}
-            </p>
-          </div>
-          <div className="flex gap-3">
-            <button onClick={() => setShowSettingsModal(true)} className="w-10 h-10 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-400 hover:text-white transition">
-              <Settings className="w-5 h-5" />
-            </button>
-            <button onClick={() => signOut(auth)} className="w-10 h-10 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center text-rose-400 hover:bg-rose-500/10 transition">
-              <LogOut className="w-4 h-4" />
-            </button>
-          </div>
-        </header>
+      <div className="space-y-6">
+        {/* Seletor de Data */}
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-2.5 flex items-center justify-between">
+          <button
+            onClick={() => setDateString(shiftDateString(dateString, -1))}
+            className="w-10 h-10 rounded-xl bg-slate-800/70 hover:bg-slate-800 flex items-center justify-center text-slate-300 transition"
+            aria-label="Dia anterior"
+          >
+            <ChevronLeft className="w-5 h-5" />
+          </button>
 
-        <div className="p-4 space-y-6 max-w-md mx-auto w-full flex-1">
-          
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 relative overflow-hidden">
-            <div className="absolute -right-10 -top-10 w-32 h-32 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none"></div>
-            
-            <div className="flex justify-center mb-4">
-              <div className="relative w-48 h-48 flex items-center justify-center">
-                <svg className="w-full h-full transform -rotate-90" viewBox="0 0 100 100">
-                  <circle cx="50" cy="50" r="45" fill="none" stroke="#1e293b" strokeWidth="8"></circle>
-                  <circle 
-                    cx="50" cy="50" r="45" fill="none" 
-                    stroke={c.calories > t.calories ? '#f43f5e' : '#10b981'} 
-                    strokeWidth="8" strokeDasharray="283" 
-                    strokeDashoffset={strokeDashoffset} 
-                    strokeLinecap="round"
-                    className="transition-all duration-1000 ease-out"
-                  ></circle>
-                </svg>
-                <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
-                  <span className="text-4xl font-extrabold tracking-tighter">{remainingCals}</span>
-                  <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest mt-1">Restantes</span>
-                </div>
-              </div>
+          <div className="text-center">
+            <div className="flex items-center justify-center gap-2">
+              <span className="text-sm font-bold text-white capitalize">
+                {isToday ? 'Hoje' : formatShortDate(dateString)}
+              </span>
+              {!isToday && (
+                <button
+                  onClick={() => setDateString(todayStr)}
+                  className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25 transition"
+                >
+                  Voltar p/ Hoje
+                </button>
+              )}
             </div>
-            
-            <div className="flex justify-between px-4 text-sm font-medium">
-              <div className="text-center">
-                <span className="text-slate-500 text-xs block mb-1">Consumido</span>
-                <span className="text-white text-lg font-bold">{c.calories}</span>
-              </div>
-              <div className="text-center">
-                <span className="text-slate-500 text-xs block mb-1">Meta</span>
-                <span className="text-white text-lg font-bold">{t.calories}</span>
-              </div>
-            </div>
+            <p className="text-[11px] text-slate-400 capitalize mt-0.5">{formatFullDatePT(dateString)}</p>
           </div>
 
-          {/* NOVO: Weight Tracker Card */}
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 relative overflow-hidden">
-            <div className="flex justify-between items-start mb-4">
-              <div>
-                <h3 className="text-lg font-bold flex items-center gap-2">
-                  <Scale className="w-5 h-5 text-indigo-400" /> Evolução Corporal
-                </h3>
-                <p className={`text-xs mt-1 font-medium ${paceColor}`}>{paceText}</p>
+          <button
+            onClick={() => !isToday && setDateString(shiftDateString(dateString, 1))}
+            disabled={isToday}
+            className="w-10 h-10 rounded-xl bg-slate-800/70 hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center text-slate-300 transition"
+            aria-label="Próximo dia"
+          >
+            <ChevronRight className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Anel de Calorias */}
+        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 relative overflow-hidden">
+          <div className="absolute -right-10 -top-10 w-32 h-32 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none" />
+
+          <div className="flex justify-center mb-4">
+            <div className="relative w-44 h-44 flex items-center justify-center">
+              <svg className="w-full h-full transform -rotate-90" viewBox="0 0 100 100">
+                <circle cx="50" cy="50" r="45" fill="none" stroke="#1e293b" strokeWidth="8" />
+                <circle
+                  cx="50"
+                  cy="50"
+                  r="45"
+                  fill="none"
+                  stroke={c.calories > t.calories && profile.goal === 'loss' ? '#f43f5e' : '#10b981'}
+                  strokeWidth="8"
+                  strokeDasharray="283"
+                  strokeDashoffset={strokeDashoffset}
+                  strokeLinecap="round"
+                  className="transition-all duration-700 ease-out"
+                />
+              </svg>
+              <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+                <span className="text-4xl font-extrabold tracking-tighter">{remainingCals}</span>
+                <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest mt-1">
+                  {c.calories >= t.calories ? 'Meta Batida' : 'Restantes'}
+                </span>
               </div>
-              <button onClick={() => setShowWeightModal(true)} className="bg-indigo-500/10 text-indigo-400 hover:bg-indigo-500/20 p-2 rounded-xl transition">
-                <Plus className="w-4 h-4" />
+            </div>
+          </div>
+
+          <div className="flex justify-between px-6 text-sm font-medium">
+            <div className="text-center">
+              <span className="text-slate-500 text-xs block mb-0.5">Consumido</span>
+              <span className="text-white text-lg font-bold">{c.calories} kcal</span>
+            </div>
+            <div className="text-center">
+              <span className="text-slate-500 text-xs block mb-0.5">Meta Diária</span>
+              <span className="text-emerald-400 text-lg font-bold">{t.calories} kcal</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Barras de Macros */}
+        <div className="grid grid-cols-3 gap-3">
+          {[
+            { id: 'pro', label: 'Proteína', current: c.protein, target: t.protein, color: 'bg-blue-500' },
+            { id: 'carb', label: 'Carboidrato', current: c.carbs, target: t.carbs, color: 'bg-amber-500' },
+            { id: 'fat', label: 'Gordura', current: c.fats, target: t.fats, color: 'bg-rose-500' }
+          ].map((macro) => (
+            <div key={macro.id} className="bg-slate-900 border border-slate-800 p-3 rounded-2xl">
+              <span className="text-[11px] font-semibold text-slate-400 block mb-1">{macro.label}</span>
+              <div className="text-sm font-bold text-white mb-2">
+                {macro.current}
+                <span className="text-[10px] font-normal text-slate-500"> / {macro.target}g</span>
+              </div>
+              <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
+                <div
+                  className={`${macro.color} h-full rounded-full transition-all duration-700`}
+                  style={{ width: `${Math.min(100, (macro.current / Math.max(1, macro.target)) * 100)}%` }}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Contador de Água */}
+        <div className="bg-slate-900 border border-slate-800 p-4 rounded-3xl flex items-center justify-between">
+          <div className="flex items-center gap-3.5">
+            <div className="w-11 h-11 rounded-2xl bg-cyan-500/10 text-cyan-400 flex items-center justify-center border border-cyan-500/20">
+              <Droplets className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-semibold text-sm">Água Consumida</h3>
+              <p className="text-xs text-slate-400 mt-0.5">
+                <strong className="text-white">{currentDayLog.water || 0}</strong> / {t.water} ml
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            {(currentDayLog.water || 0) >= 250 && (
+              <button
+                onClick={() => addWater(-250)}
+                className="w-9 h-9 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 border border-slate-700 transition flex items-center justify-center"
+                title="Remover 250ml"
+              >
+                <Minus className="w-4 h-4" />
               </button>
-            </div>
-
-            <div className="flex justify-between items-end mb-4">
-              <div>
-                <span className="text-3xl font-extrabold text-white">{profile.weight}</span>
-                <span className="text-sm text-slate-400 ml-1">kg</span>
-                <div className="text-[10px] text-slate-500 uppercase tracking-widest mt-1">Atual</div>
-              </div>
-              <div className="text-right">
-                <div className="flex items-center justify-end gap-1 text-slate-400 mb-1">
-                  <Target className="w-3 h-3" />
-                  <span className="text-sm font-bold text-white">{profile.targetWeight}</span>
-                  <span className="text-xs">kg</span>
-                </div>
-                <div className="text-[10px] text-slate-500 uppercase tracking-widest">Meta</div>
-              </div>
-            </div>
-
-            {/* Mini Graph */}
-            {history.length > 0 && (
-              <div className="h-16 w-full mt-2 relative">
-                 <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="w-full h-full overflow-visible">
-                    <line x1="0" y1={targetY} x2="100" y2={targetY} stroke="#10b981" strokeWidth="1" strokeDasharray="4 4" opacity="0.5" />
-                    {history.length > 1 && (
-                      <polyline 
-                        points={points}
-                        fill="none" 
-                        stroke="#6366f1" 
-                        strokeWidth="3" 
-                        strokeLinecap="round" 
-                        strokeLinejoin="round" 
-                      />
-                    )}
-                 </svg>
-              </div>
             )}
-          </div>
-
-          <div className="grid grid-cols-3 gap-3">
-            {[
-              { id: 'pro', label: 'Proteína', current: c.protein, target: t.protein, color: 'bg-blue-500', bg: 'bg-blue-500/20' },
-              { id: 'carb', label: 'Carboidrato', current: c.carbs, target: t.carbs, color: 'bg-amber-500', bg: 'bg-amber-500/20' },
-              { id: 'fat', label: 'Gordura', current: c.fats, target: t.fats, color: 'bg-rose-500', bg: 'bg-rose-500/20' }
-            ].map(macro => (
-              <div key={macro.id} className="bg-slate-900 border border-slate-800 p-3 rounded-2xl">
-                <div className="flex justify-between items-center mb-2">
-                  <span className="text-[11px] font-semibold text-slate-300">{macro.label}</span>
-                </div>
-                <div className="text-sm font-bold text-white mb-2">{macro.current} <span className="text-[10px] font-normal text-slate-500">/ {macro.target}g</span></div>
-                <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
-                  <div 
-                    className={`${macro.color} h-full rounded-full transition-all duration-1000`} 
-                    style={{ width: `${Math.min(100, (macro.current / macro.target) * 100)}%` }}
-                  ></div>
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <div className="bg-slate-900 border border-slate-800 p-4 rounded-3xl flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <div className="w-12 h-12 rounded-2xl bg-cyan-500/10 text-cyan-400 flex items-center justify-center border border-cyan-500/20">
-                <Droplets className="w-6 h-6" />
-              </div>
-              <div>
-                <h3 className="font-semibold text-sm">Água Consumida</h3>
-                <p className="text-xs text-slate-400 mt-0.5"><strong className="text-white">{todayLog.water}</strong> / {t.water} ml</p>
-              </div>
-            </div>
-            <button onClick={() => addWater(250)} className="w-10 h-10 rounded-full bg-slate-800 hover:bg-cyan-500/20 hover:text-cyan-400 border border-slate-700 transition flex items-center justify-center">
-              <Plus className="w-5 h-5" />
+            <button
+              onClick={() => addWater(250)}
+              className="px-3.5 h-9 rounded-full bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 border border-cyan-500/30 transition flex items-center gap-1 text-xs font-bold"
+            >
+              <Plus className="w-3.5 h-3.5" /> 250ml
             </button>
           </div>
+        </div>
 
-          <div className="space-y-4">
-            <h3 className="font-bold text-lg px-1 pt-2">Refeições</h3>
-            {mealSections.map((section, idx) => {
-              const mealsInSection = todayLog.meals.filter(m => m.section === section.name);
-              const sectionCals = mealsInSection.reduce((acc, curr) => acc + curr.calories, 0);
+        {/* Lista de Seções de Refeições */}
+        <div className="space-y-3">
+          <div className="flex items-center justify-between px-1">
+            <h3 className="font-bold text-base">Refeições</h3>
+            <span className="text-xs text-slate-500">
+              {savedMeals.length} {savedMeals.length === 1 ? 'salva' : 'salvas'} nos frequentes
+            </span>
+          </div>
 
-              return (
-                <div key={idx} className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
-                  <div 
-                    className="p-4 flex justify-between items-center bg-slate-800/30 cursor-pointer hover:bg-slate-800/50 transition"
-                    onClick={(e) => {
-                      const content = e.currentTarget.nextElementSibling;
-                      content.classList.toggle('hidden');
-                    }}
-                  >
-                    <div className="flex items-center gap-3">
-                      <section.icon className={`w-5 h-5 ${section.color}`} />
-                      <span className="font-semibold text-sm">{section.name}</span>
-                    </div>
-                    <div className="flex items-center gap-4">
-                      <span className="text-xs font-bold text-slate-300">{sectionCals} kcal</span>
-                      <button 
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSelectedMealSection(section.name);
-                          setShowMealModal(true);
-                        }} 
-                        className="text-emerald-400 hover:text-emerald-300 w-8 h-8 rounded-full bg-emerald-500/10 flex items-center justify-center transition"
-                      >
-                        <Plus className="w-4 h-4" />
-                      </button>
+          {MEAL_SECTIONS.map((section) => {
+            const mealsInSection = (currentDayLog.meals || []).filter((m) => m.section === section.name);
+            const sectionCals = mealsInSection.reduce((acc, curr) => acc + (curr.calories || 0), 0);
+
+            return (
+              <div key={section.name} className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
+                <div className="p-3.5 flex justify-between items-center bg-slate-800/30">
+                  <div className="flex items-center gap-3">
+                    <section.icon className={`w-5 h-5 ${section.color}`} />
+                    <div>
+                      <span className="font-semibold text-sm block">{section.name}</span>
+                      <span className="text-[11px] text-slate-400">{sectionCals} kcal</span>
                     </div>
                   </div>
-                  
-                  <div className={`${mealsInSection.length === 0 ? 'hidden' : ''} border-t border-slate-800 p-2 space-y-2 bg-slate-900/50`}>
-                    {mealsInSection.length === 0 ? (
-                      <div className="p-3 text-center text-xs text-slate-500 italic">Nenhuma refeição registrada.</div>
-                    ) : (
-                      mealsInSection.map((m, i) => (
-                        <div key={i} className="p-3 bg-slate-950 rounded-xl flex justify-between items-center border border-slate-800/50">
-                          <div>
-                            <p className="text-sm font-medium text-slate-200">{m.name}</p>
-                            <p className="text-[10px] text-slate-400 mt-1">P: {m.protein}g • C: {m.carbs}g • G: {m.fats}g</p>
-                          </div>
+                  <button
+                    onClick={() => {
+                      setSelectedMealSection(section.name);
+                      setShowMealModal(true);
+                    }}
+                    className="text-emerald-400 hover:bg-emerald-500 hover:text-slate-950 w-9 h-9 rounded-full bg-emerald-500/10 flex items-center justify-center transition"
+                    title={`Adicionar em ${section.name}`}
+                  >
+                    <Plus className="w-4 h-4" />
+                  </button>
+                </div>
+
+                {mealsInSection.length > 0 && (
+                  <div className="border-t border-slate-800 p-2 space-y-2 bg-slate-950/40">
+                    {mealsInSection.map((m, idx) => (
+                      <div
+                        key={m.id || idx}
+                        className="p-3 bg-slate-950 rounded-xl flex justify-between items-center gap-2 border border-slate-800/60"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-medium text-slate-200 truncate">{m.name}</p>
+                          <p className="text-[10px] text-slate-400 mt-0.5">
+                            P: {m.protein}g • C: {m.carbs}g • G: {m.fats}g
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2.5 shrink-0">
                           <div className="text-right">
-                            <span className="text-sm font-bold block">{m.calories}</span>
+                            <span className="text-sm font-bold block leading-tight">{m.calories}</span>
                             <span className="text-[9px] text-slate-500 uppercase">kcal</span>
                           </div>
+                          <button
+                            onClick={() => removeMealFromDay(m.id || idx)}
+                            className="p-1.5 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition"
+                            title="Remover refeição"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
                         </div>
-                      ))
-                    )}
+                      </div>
+                    ))}
                   </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  // ==========================================
+  // ABA 2: HISTÓRICO (SEMANAL E MENSAL)
+  // ==========================================
+  const HistoryView = () => {
+    const [periodDays, setPeriodDays] = useState(7); // 7 ou 30
+    const [hoveredDay, setHoveredDay] = useState(null);
+    const t = profile.targets;
+
+    const periodData = useMemo(() => {
+      const dates = getPastDateRange(periodDays);
+      const series = dates.map((d) => {
+        const log = allLogsMap[d];
+        const totals = log?.totals || { calories: 0, protein: 0, carbs: 0, fats: 0 };
+        const hasEntries = (log?.meals?.length || 0) > 0 || totals.calories > 0;
+        return {
+          date: d,
+          calories: totals.calories || 0,
+          protein: totals.protein || 0,
+          carbs: totals.carbs || 0,
+          fats: totals.fats || 0,
+          water: log?.water || 0,
+          mealsCount: log?.meals?.length || 0,
+          hasEntries
+        };
+      });
+
+      const loggedDays = series.filter((s) => s.hasEntries);
+      const count = loggedDays.length;
+
+      const avgCalories = count > 0 ? Math.round(loggedDays.reduce((a, b) => a + b.calories, 0) / count) : 0;
+      const avgProtein = count > 0 ? Math.round(loggedDays.reduce((a, b) => a + b.protein, 0) / count) : 0;
+      const avgCarbs = count > 0 ? Math.round(loggedDays.reduce((a, b) => a + b.carbs, 0) / count) : 0;
+      const avgFats = count > 0 ? Math.round(loggedDays.reduce((a, b) => a + b.fats, 0) / count) : 0;
+
+      // Adesão conforme objetivo
+      const adherentDays = loggedDays.filter((d) => {
+        if (profile.goal === 'gain') return d.calories >= t.calories * 0.9;
+        if (profile.goal === 'loss') return d.calories <= t.calories * 1.1;
+        return d.calories >= t.calories * 0.9 && d.calories <= t.calories * 1.1;
+      }).length;
+
+      const adherencePct = count > 0 ? Math.round((adherentDays / count) * 100) : 0;
+      const maxCal = Math.max(t.calories * 1.15, ...series.map((s) => s.calories), 1000);
+
+      return {
+        series,
+        loggedDaysDesc: [...loggedDays].reverse(),
+        count,
+        avgCalories,
+        avgProtein,
+        avgCarbs,
+        avgFats,
+        adherencePct,
+        maxCal
+      };
+    }, [allLogsMap, periodDays, t.calories, profile.goal]);
+
+    const targetLineBottomPct = Math.min(95, (t.calories / periodData.maxCal) * 100);
+
+    return (
+      <div className="space-y-6">
+        {/* Seletor de Período */}
+        <div className="grid grid-cols-2 gap-2 bg-slate-900 p-1.5 rounded-2xl border border-slate-800">
+          <button
+            onClick={() => {
+              setPeriodDays(7);
+              setHoveredDay(null);
+            }}
+            className={`py-2.5 rounded-xl text-xs font-bold transition ${
+              periodDays === 7
+                ? 'bg-emerald-500 text-slate-950 shadow'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            Semanal (7 dias)
+          </button>
+          <button
+            onClick={() => {
+              setPeriodDays(30);
+              setHoveredDay(null);
+            }}
+            className={`py-2.5 rounded-xl text-xs font-bold transition ${
+              periodDays === 30
+                ? 'bg-emerald-500 text-slate-950 shadow'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            Mensal (30 dias)
+          </button>
+        </div>
+
+        {/* Cards de Resumo */}
+        <div className="grid grid-cols-2 gap-3">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+            <span className="text-[11px] text-slate-400 font-medium block">Média Calorias/dia</span>
+            <div className="mt-1 flex items-baseline gap-1">
+              <span className="text-2xl font-extrabold text-white">{periodData.avgCalories}</span>
+              <span className="text-xs text-slate-500">kcal</span>
+            </div>
+            <span className="text-[10px] text-slate-500 mt-1 block">Meta: {t.calories} kcal</span>
+          </div>
+
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+            <span className="text-[11px] text-slate-400 font-medium block">Média Proteína/dia</span>
+            <div className="mt-1 flex items-baseline gap-1">
+              <span className="text-2xl font-extrabold text-blue-400">{periodData.avgProtein}</span>
+              <span className="text-xs text-slate-500">g</span>
+            </div>
+            <span className="text-[10px] text-slate-500 mt-1 block">Meta: {t.protein}g</span>
+          </div>
+
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+            <span className="text-[11px] text-slate-400 font-medium block">Adesão à Meta</span>
+            <div className="mt-1 flex items-baseline gap-1">
+              <span className="text-2xl font-extrabold text-emerald-400">{periodData.adherencePct}%</span>
+            </div>
+            <span className="text-[10px] text-slate-500 mt-1 block">
+              {profile.goal === 'gain' ? 'Dias ≥ 90% da meta' : 'Dias dentro da meta'}
+            </span>
+          </div>
+
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+            <span className="text-[11px] text-slate-400 font-medium block">Dias Registrados</span>
+            <div className="mt-1 flex items-baseline gap-1">
+              <span className="text-2xl font-extrabold text-white">{periodData.count}</span>
+              <span className="text-xs text-slate-500">/ {periodDays} dias</span>
+            </div>
+            <span className="text-[10px] text-slate-500 mt-1 block">Consistência no período</span>
+          </div>
+        </div>
+
+        {/* Gráfico de Barras de Calorias vs Meta */}
+        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <BarChart3 className="w-4 h-4 text-emerald-400" /> Calorias no Período
+              </h3>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                {hoveredDay
+                  ? `${formatShortDate(hoveredDay.date)}: ${hoveredDay.calories} kcal (P:${hoveredDay.protein}g)`
+                  : 'Toque em uma barra para detalhes'}
+              </p>
+            </div>
+            <span className="text-[10px] font-semibold text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded-lg border border-emerald-500/20">
+              Meta: {t.calories}
+            </span>
+          </div>
+
+          <div className="relative h-44 pt-4 pb-6 flex items-end gap-1">
+            {/* Linha Tracejada da Meta */}
+            <div
+              className="absolute left-0 right-0 border-t border-dashed border-emerald-400/70 pointer-events-none z-10"
+              style={{ bottom: `calc(24px + ${targetLineBottomPct * 0.78}%)` }}
+            />
+
+            {periodData.series.map((day, idx) => {
+              const heightPct = day.calories > 0 ? Math.max(4, (day.calories / periodData.maxCal) * 100) : 2;
+              const isMet =
+                profile.goal === 'gain'
+                  ? day.calories >= t.calories * 0.9
+                  : profile.goal === 'loss'
+                  ? day.calories > 0 && day.calories <= t.calories * 1.1
+                  : day.calories >= t.calories * 0.9 && day.calories <= t.calories * 1.1;
+
+              const barColor = !day.hasEntries
+                ? 'bg-slate-800'
+                : isMet
+                ? 'bg-emerald-500 hover:bg-emerald-400'
+                : 'bg-amber-500/80 hover:bg-amber-400';
+
+              const showLabel =
+                periodDays === 7 || idx === 0 || idx === 9 || idx === 19 || idx === periodDays - 1;
+
+              return (
+                <div
+                  key={day.date}
+                  className="flex-1 h-full flex flex-col justify-end items-center relative group cursor-pointer"
+                  onClick={() => setHoveredDay(day)}
+                >
+                  <div className="w-full flex-1 flex items-end justify-center">
+                    <div
+                      className={`w-full max-w-[28px] rounded-t-md transition-all duration-500 ${barColor} ${
+                        hoveredDay?.date === day.date ? 'ring-2 ring-white/60' : ''
+                      }`}
+                      style={{ height: `${heightPct}%` }}
+                    />
+                  </div>
+                  <span className="text-[9px] text-slate-500 mt-1.5 h-3 leading-none">
+                    {showLabel ? formatShortDate(day.date) : ''}
+                  </span>
                 </div>
               );
             })}
           </div>
         </div>
 
-        <button 
-          onClick={() => { setSelectedMealSection('Outros'); setShowMealModal(true); }} 
-          className="fixed bottom-6 right-6 w-14 h-14 bg-emerald-500 text-slate-950 rounded-full shadow-[0_4px_20px_rgba(16,185,129,0.5)] flex items-center justify-center hover:scale-105 transition-transform z-20"
+        {/* Médias de Macros do Período */}
+        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 space-y-3">
+          <h3 className="text-sm font-bold text-white">Médias de Macronutrientes</h3>
+          {[
+            { label: 'Proteína', avg: periodData.avgProtein, target: t.protein, color: 'bg-blue-500' },
+            { label: 'Carboidrato', avg: periodData.avgCarbs, target: t.carbs, color: 'bg-amber-500' },
+            { label: 'Gordura', avg: periodData.avgFats, target: t.fats, color: 'bg-rose-500' }
+          ].map((m) => (
+            <div key={m.label}>
+              <div className="flex justify-between text-xs mb-1">
+                <span className="text-slate-300 font-medium">{m.label}</span>
+                <span className="text-slate-400">
+                  <strong className="text-white">{m.avg}g</strong> / {m.target}g
+                </span>
+              </div>
+              <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
+                <div
+                  className={`${m.color} h-full rounded-full transition-all duration-700`}
+                  style={{ width: `${Math.min(100, (m.avg / Math.max(1, m.target)) * 100)}%` }}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Lista Cronológica dos Dias Registrados */}
+        <div className="space-y-3">
+          <h3 className="text-sm font-bold text-white px-1">
+            Registros do Período ({periodData.loggedDaysDesc.length})
+          </h3>
+
+          {periodData.loggedDaysDesc.length === 0 ? (
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 text-center">
+              <Calendar className="w-8 h-8 text-slate-600 mx-auto mb-2" />
+              <p className="text-sm text-slate-400">Nenhum dia registrado neste período.</p>
+              <p className="text-xs text-slate-500 mt-1">
+                Adicione refeições na aba "Hoje" para acompanhar seu histórico.
+              </p>
+            </div>
+          ) : (
+            periodData.loggedDaysDesc.map((day) => (
+              <button
+                key={day.date}
+                onClick={() => {
+                  setDateString(day.date);
+                  setActiveTab('today');
+                }}
+                className="w-full text-left bg-slate-900 hover:bg-slate-800/80 border border-slate-800 rounded-2xl p-4 flex items-center justify-between transition group"
+              >
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-bold text-white">{formatShortDate(day.date)}</span>
+                    <span className="text-[11px] text-slate-400 capitalize">
+                      {formatFullDatePT(day.date).split(',')[0]}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    P: <span className="text-blue-400 font-medium">{day.protein}g</span> • C:{' '}
+                    <span className="text-amber-400 font-medium">{day.carbs}g</span> • G:{' '}
+                    <span className="text-rose-400 font-medium">{day.fats}g</span>
+                  </p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <div className="text-right">
+                    <span className="text-base font-extrabold text-white block">{day.calories}</span>
+                    <span className="text-[10px] text-slate-500 uppercase">kcal</span>
+                  </div>
+                  <ChevronRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition" />
+                </div>
+              </button>
+            ))
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // ==========================================
+  // ABA 3: EVOLUÇÃO CORPORAL
+  // ==========================================
+  const EvolutionView = () => {
+    const [isEditingGoal, setIsEditingGoal] = useState(false);
+    const [goalInput, setGoalInput] = useState(String(profile.targetWeight || 75));
+    const [newWeight, setNewWeight] = useState(String(profile.weight || ''));
+    const [weightDate, setWeightDate] = useState(getLocalDateString());
+    const [selectedPoint, setSelectedPoint] = useState(null);
+
+    const currentWeight =
+      weightLogs.length > 0 ? weightLogs[weightLogs.length - 1].weight : Number(profile.weight || 0);
+    const targetWeight = Number(profile.targetWeight || 75);
+    const diffToGoal = targetWeight - currentWeight;
+
+    // Cálculo de Ritmo Semanal (Pace)
+    const paceInfo = useMemo(() => {
+      if (weightLogs.length < 2) {
+        return {
+          paceLabel: '-- kg/sem',
+          statusText: 'Registre pelo menos 2 pesagens para calcular o ritmo semanal.',
+          colorClass: 'text-slate-400 bg-slate-800/70 border-slate-700'
+        };
+      }
+      const first = weightLogs[0];
+      const last = weightLogs[weightLogs.length - 1];
+      const d1 = new Date(first.date + 'T12:00:00');
+      const d2 = new Date(last.date + 'T12:00:00');
+      const daysDiff = Math.max(1, (d2 - d1) / (1000 * 60 * 60 * 24));
+      const weeks = daysDiff / 7;
+      const weeklyRate = (last.weight - first.weight) / Math.max(weeks, 0.25);
+      const formatted = `${weeklyRate >= 0 ? '+' : ''}${weeklyRate.toFixed(2)} kg/sem`;
+
+      if (profile.goal === 'gain') {
+        if (weeklyRate >= 0.2 && weeklyRate <= 0.5) {
+          return {
+            paceLabel: formatted,
+            statusText: 'Ritmo ideal para ganho de massa magra!',
+            colorClass: 'text-emerald-300 bg-emerald-500/10 border-emerald-500/30'
+          };
+        }
+        if (weeklyRate > 0.5) {
+          return {
+            paceLabel: formatted,
+            statusText: 'Ganho acelerado — monitore o acúmulo de gordura.',
+            colorClass: 'text-amber-300 bg-amber-500/10 border-amber-500/30'
+          };
+        }
+        if (weeklyRate > 0) {
+          return {
+            paceLabel: formatted,
+            statusText: 'Evolução lenta — considere +150 kcal diárias.',
+            colorClass: 'text-amber-300 bg-amber-500/10 border-amber-500/30'
+          };
+        }
+        return {
+          paceLabel: formatted,
+          statusText: 'Peso estagnado ou em queda — aumente o superávit.',
+          colorClass: 'text-rose-300 bg-rose-500/10 border-rose-500/30'
+        };
+      }
+
+      return {
+        paceLabel: formatted,
+        statusText: `Variação média baseada em ${weightLogs.length} registros.`,
+        colorClass: 'text-slate-200 bg-slate-800/80 border-slate-700'
+      };
+    }, [weightLogs, profile.goal]);
+
+    // Preparação do Gráfico SVG
+    const chartData = useMemo(() => {
+      const paddingX = 12;
+      const paddingY = 14;
+      const width = 320;
+      const height = 160;
+
+      const allVals = [...weightLogs.map((w) => w.weight), targetWeight];
+      const rawMin = Math.min(...allVals);
+      const rawMax = Math.max(...allVals);
+      const margin = Math.max(1.5, (rawMax - rawMin) * 0.2);
+      const minW = Math.floor((rawMin - margin) * 2) / 2;
+      const maxW = Math.ceil((rawMax + margin) * 2) / 2;
+      const range = Math.max(1, maxW - minW);
+
+      const mapY = (val) =>
+        height - paddingY - ((val - minW) / range) * (height - paddingY * 2);
+
+      const pts = weightLogs.map((entry, idx) => {
+        const x =
+          weightLogs.length > 1
+            ? paddingX + (idx / (weightLogs.length - 1)) * (width - paddingX * 2)
+            : width / 2;
+        const y = mapY(entry.weight);
+        return { ...entry, x, y };
+      });
+
+      const polylineStr = pts.map((p) => `${p.x},${p.y}`).join(' ');
+      const areaStr =
+        pts.length > 1
+          ? `${pts[0].x},${height - paddingY} ${polylineStr} ${pts[pts.length - 1].x},${height - paddingY}`
+          : '';
+
+      return {
+        width,
+        height,
+        minW,
+        maxW,
+        targetY: mapY(targetWeight),
+        pts,
+        polylineStr,
+        areaStr
+      };
+    }, [weightLogs, targetWeight]);
+
+    const handleGoalSave = async (e) => {
+      e.preventDefault();
+      await updateTargetWeight(goalInput);
+      setIsEditingGoal(false);
+    };
+
+    const handleNewWeightSubmit = async (e) => {
+      e.preventDefault();
+      await saveWeightLog(newWeight, weightDate);
+    };
+
+    const reversedLogs = [...weightLogs].reverse();
+
+    return (
+      <div className="space-y-6">
+        {/* Card Interativo de Meta de Peso */}
+        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 relative overflow-hidden">
+          <div className="absolute -right-8 -top-8 w-28 h-28 bg-emerald-500/10 rounded-full blur-2xl pointer-events-none" />
+
+          <div className="flex items-start justify-between mb-4">
+            <div>
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <Target className="w-5 h-5 text-emerald-400" /> Meta de Peso
+              </h3>
+              <p className="text-xs text-slate-400 mt-0.5">
+                {Math.abs(diffToGoal) < 0.1
+                  ? 'Meta atingida! Parabéns!'
+                  : diffToGoal > 0
+                  ? `Faltam +${diffToGoal.toFixed(1)} kg para atingir a meta`
+                  : `Faltam ${diffToGoal.toFixed(1)} kg para atingir a meta`}
+              </p>
+            </div>
+            <button
+              onClick={() => {
+                setGoalInput(String(targetWeight));
+                setIsEditingGoal(!isEditingGoal);
+              }}
+              className="text-xs font-semibold px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700 transition flex items-center gap-1"
+            >
+              <Edit3 className="w-3.5 h-3.5" /> {isEditingGoal ? 'Fechar' : 'Editar Meta'}
+            </button>
+          </div>
+
+          {isEditingGoal ? (
+            <form onSubmit={handleGoalSave} className="flex items-center gap-2 mb-4 bg-slate-950 p-3 rounded-2xl border border-emerald-500/40">
+              <input
+                type="number"
+                step="0.1"
+                required
+                value={goalInput}
+                onChange={(e) => setGoalInput(e.target.value)}
+                className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white font-bold text-base focus:outline-none focus:border-emerald-500"
+              />
+              <span className="text-xs text-slate-400 font-bold">kg</span>
+              <button
+                type="submit"
+                className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs px-4 py-2.5 rounded-xl transition"
+              >
+                Salvar
+              </button>
+            </form>
+          ) : (
+            <div className="grid grid-cols-2 gap-4 mb-4">
+              <div className="bg-slate-950/70 border border-slate-800 rounded-2xl p-3.5">
+                <span className="text-[10px] uppercase tracking-wider text-slate-500 block">Peso Atual</span>
+                <div className="mt-1 flex items-baseline gap-1">
+                  <span className="text-3xl font-extrabold text-white">{currentWeight.toFixed(1)}</span>
+                  <span className="text-xs text-slate-400">kg</span>
+                </div>
+              </div>
+              <div className="bg-slate-950/70 border border-emerald-500/20 rounded-2xl p-3.5">
+                <span className="text-[10px] uppercase tracking-wider text-emerald-400 block">Meta Atribuída</span>
+                <div className="mt-1 flex items-baseline gap-1">
+                  <span className="text-3xl font-extrabold text-emerald-400">{targetWeight.toFixed(1)}</span>
+                  <span className="text-xs text-emerald-400/70">kg</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Indicador de Ritmo (Pace Semanal) */}
+          <div className={`p-3 rounded-2xl border text-xs flex items-center justify-between gap-3 ${paceInfo.colorClass}`}>
+            <div className="flex items-center gap-2 min-w-0">
+              <Award className="w-4 h-4 shrink-0" />
+              <span className="truncate">{paceInfo.statusText}</span>
+            </div>
+            <span className="font-extrabold shrink-0">{paceInfo.paceLabel}</span>
+          </div>
+        </div>
+
+        {/* Gráfico de Evolução em SVG */}
+        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <Scale className="w-4 h-4 text-emerald-400" /> Curva de Evolução
+              </h3>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                {selectedPoint
+                  ? `${formatShortDate(selectedPoint.date)}: ${selectedPoint.weight.toFixed(1)} kg`
+                  : 'Toque nos pontos para inspecionar'}
+              </p>
+            </div>
+            <span className="text-[10px] text-slate-400">
+              {chartData.minW.toFixed(1)} – {chartData.maxW.toFixed(1)} kg
+            </span>
+          </div>
+
+          {weightLogs.length === 0 ? (
+            <div className="h-36 flex items-center justify-center text-xs text-slate-500 border border-dashed border-slate-800 rounded-2xl">
+              Registre sua primeira pesagem abaixo para gerar o gráfico.
+            </div>
+          ) : (
+            <div className="w-full overflow-hidden">
+              <svg
+                viewBox={`0 0 ${chartData.width} ${chartData.height}`}
+                className="w-full h-44 overflow-visible"
+              >
+                <defs>
+                  <linearGradient id="weightAreaGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#10b981" stopOpacity="0.32" />
+                    <stop offset="100%" stopColor="#10b981" stopOpacity="0.0" />
+                  </linearGradient>
+                </defs>
+
+                {/* Linha horizontal tracejada da Meta */}
+                <line
+                  x1="0"
+                  y1={chartData.targetY}
+                  x2={chartData.width}
+                  y2={chartData.targetY}
+                  stroke="#34d399"
+                  strokeWidth="1.2"
+                  strokeDasharray="5 4"
+                  opacity="0.75"
+                />
+                <text
+                  x={chartData.width - 4}
+                  y={Math.max(12, chartData.targetY - 5)}
+                  textAnchor="end"
+                  fill="#34d399"
+                  fontSize="9"
+                  fontWeight="bold"
+                >
+                  Meta: {targetWeight.toFixed(1)} kg
+                </text>
+
+                {/* Área preenchida sob a curva */}
+                {chartData.areaStr && (
+                  <polygon points={chartData.areaStr} fill="url(#weightAreaGrad)" />
+                )}
+
+                {/* Linha da evolução */}
+                {chartData.pts.length > 1 && (
+                  <polyline
+                    points={chartData.polylineStr}
+                    fill="none"
+                    stroke="#10b981"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                )}
+
+                {/* Pontos clicáveis */}
+                {chartData.pts.map((pt, idx) => {
+                  const isSelected = selectedPoint?.date === pt.date;
+                  const showEdgeText =
+                    chartData.pts.length <= 6 ||
+                    idx === 0 ||
+                    idx === chartData.pts.length - 1 ||
+                    isSelected;
+                  return (
+                    <g
+                      key={pt.date}
+                      onClick={() => setSelectedPoint(pt)}
+                      className="cursor-pointer"
+                    >
+                      <circle
+                        cx={pt.x}
+                        cy={pt.y}
+                        r={isSelected ? 6 : 4}
+                        fill={isSelected ? '#ffffff' : '#10b981'}
+                        stroke="#020617"
+                        strokeWidth="2"
+                      />
+                      {showEdgeText && (
+                        <>
+                          <text
+                            x={pt.x}
+                            y={pt.y - 9}
+                            textAnchor="middle"
+                            fill="#e2e8f0"
+                            fontSize="8.5"
+                            fontWeight="bold"
+                          >
+                            {pt.weight.toFixed(1)}
+                          </text>
+                          <text
+                            x={pt.x}
+                            y={chartData.height - 1}
+                            textAnchor="middle"
+                            fill="#64748b"
+                            fontSize="8"
+                          >
+                            {formatShortDate(pt.date)}
+                          </text>
+                        </>
+                      )}
+                    </g>
+                  );
+                })}
+              </svg>
+            </div>
+          )}
+        </div>
+
+        {/* Formulário Rápido de Nova Pesagem */}
+        <form
+          onSubmit={handleNewWeightSubmit}
+          className="bg-slate-900 border border-slate-800 rounded-3xl p-5 space-y-3"
         >
-          <Plus className="w-6 h-6" />
-        </button>
+          <h3 className="text-sm font-bold text-white">Registrar Nova Pesagem</h3>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-[11px] text-slate-400 block mb-1 ml-1">Peso (kg)</label>
+              <input
+                type="number"
+                step="0.1"
+                required
+                value={newWeight}
+                onChange={(e) => setNewWeight(e.target.value)}
+                placeholder="Ex: 68.5"
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white font-bold text-sm focus:outline-none focus:border-emerald-500"
+              />
+            </div>
+            <div>
+              <label className="text-[11px] text-slate-400 block mb-1 ml-1">Data</label>
+              <input
+                type="date"
+                required
+                max={getLocalDateString()}
+                value={weightDate}
+                onChange={(e) => setWeightDate(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-emerald-500"
+              />
+            </div>
+          </div>
+          <button
+            type="submit"
+            className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-3 rounded-xl transition text-sm"
+          >
+            Salvar Pesagem
+          </button>
+        </form>
+
+        {/* Histórico de Pesagens */}
+        <div className="space-y-2.5">
+          <h3 className="text-sm font-bold text-white px-1">
+            Histórico de Pesagens ({reversedLogs.length})
+          </h3>
+          {reversedLogs.length === 0 ? (
+            <p className="text-xs text-slate-500 text-center py-4">Nenhuma pesagem registrada.</p>
+          ) : (
+            reversedLogs.map((entry, idx) => {
+              const prevEntry = reversedLogs[idx + 1];
+              const delta = prevEntry ? entry.weight - prevEntry.weight : null;
+              return (
+                <div
+                  key={entry.date}
+                  className="bg-slate-900 border border-slate-800 rounded-2xl p-3.5 flex items-center justify-between"
+                >
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-base font-extrabold text-white">
+                        {entry.weight.toFixed(1)} kg
+                      </span>
+                      {delta !== null && (
+                        <span
+                          className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${
+                            delta > 0
+                              ? 'bg-emerald-500/15 text-emerald-400'
+                              : delta < 0
+                              ? 'bg-rose-500/15 text-rose-400'
+                              : 'bg-slate-800 text-slate-400'
+                          }`}
+                        >
+                          {delta > 0 ? `+${delta.toFixed(1)}` : delta.toFixed(1)} kg
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-[11px] text-slate-400 capitalize">
+                      {formatShortDate(entry.date)} • {formatFullDatePT(entry.date).split(',')[0]}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => deleteWeightLog(entry.date)}
+                    className="p-2 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-xl transition"
+                    title="Excluir registro"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // ==========================================
+  // CONTAINER DO DASHBOARD COM NAVEGAÇÃO INFERIOR
+  // ==========================================
+  const DashboardScreen = () => {
+    if (!profile) return null;
+
+    const headerTitle =
+      activeTab === 'today' ? 'NutriFit AI' : activeTab === 'history' ? 'Histórico' : 'Evolução Corporal';
+
+    return (
+      <div className="min-h-screen bg-slate-950 text-white flex flex-col relative pb-28">
+        {/* Cabeçalho Fixo */}
+        <header className="sticky top-0 z-20 bg-slate-950/85 backdrop-blur-lg border-b border-slate-800 px-5 py-4 flex justify-between items-center">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+              <Activity className="w-5 h-5" />
+            </div>
+            <div>
+              <h1 className="text-lg font-extrabold leading-tight">{headerTitle}</h1>
+              <p className="text-[11px] text-slate-400">
+                Meta: <span className="text-emerald-400 font-semibold">{profile.targetWeight || 75} kg</span>
+              </p>
+            </div>
+          </div>
+
+          <div className="flex gap-2">
+            <button
+              onClick={() => setShowSettingsModal(true)}
+              className="w-10 h-10 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-400 hover:text-white transition"
+              title="Configurações"
+            >
+              <Settings className="w-5 h-5" />
+            </button>
+            <button
+              onClick={() => signOut(auth)}
+              className="w-10 h-10 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center text-rose-400 hover:bg-rose-500/10 transition"
+              title="Sair"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          </div>
+        </header>
+
+        {/* Conteúdo da Aba Ativa */}
+        <main className="p-4 max-w-md mx-auto w-full flex-1">
+          {activeTab === 'today' && <TodayView />}
+          {activeTab === 'history' && <HistoryView />}
+          {activeTab === 'evolution' && <EvolutionView />}
+        </main>
+
+        {/* Botão Flutuante (visível apenas na aba Hoje) */}
+        {activeTab === 'today' && (
+          <button
+            onClick={() => {
+              setSelectedMealSection('Almoço');
+              setShowMealModal(true);
+            }}
+            className="fixed bottom-24 right-5 w-14 h-14 bg-emerald-500 hover:bg-emerald-400 text-slate-950 rounded-full shadow-[0_4px_24px_rgba(16,185,129,0.5)] flex items-center justify-center hover:scale-105 transition-transform z-20"
+            title="Adicionar refeição"
+          >
+            <Plus className="w-6 h-6" />
+          </button>
+        )}
+
+        {/* Barra de Navegação Inferior Fixa */}
+        <nav className="fixed bottom-0 left-0 right-0 z-30 bg-slate-950/95 backdrop-blur-lg border-t border-slate-800">
+          <div className="max-w-md mx-auto grid grid-cols-3 px-2 py-2">
+            {[
+              { id: 'today', label: 'Hoje', Icon: Utensils },
+              { id: 'history', label: 'Histórico', Icon: BarChart3 },
+              { id: 'evolution', label: 'Evolução', Icon: Scale }
+            ].map(({ id, label, Icon }) => {
+              const isActive = activeTab === id;
+              return (
+                <button
+                  key={id}
+                  onClick={() => setActiveTab(id)}
+                  className={`flex flex-col items-center justify-center py-2 rounded-2xl transition ${
+                    isActive ? 'text-emerald-400 bg-emerald-500/10' : 'text-slate-500 hover:text-slate-300'
+                  }`}
+                >
+                  <Icon className="w-5 h-5 mb-1" />
+                  <span className="text-[11px] font-bold">{label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </nav>
       </div>
     );
   };
@@ -916,7 +2405,6 @@ export default function App() {
     <div className="font-sans antialiased text-slate-100 bg-slate-950 min-h-screen">
       <Toast />
       <MealModal />
-      <WeightModal />
       <SettingsModal />
 
       {currentScreen === 'auth' && <AuthScreen />}
